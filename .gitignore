@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Third-party SDK
+marvin_sdk/
+
+# Build artifacts
+*.so
+*.dll
+*.dylib
+build/
+dist/
+
+# Training artifacts
+checkpoints/
+videos/
+demos.pkl
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Personal config
+.claude/
