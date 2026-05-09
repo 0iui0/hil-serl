@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv*/
+venv*/
+
+# Third-party SDK
+marvin_sdk/
+
+# Build artifacts (C/C++ compilation)
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+build/
+dist/
+
+# Archives & large binary assets
+*.pdf
+*.zip
+*.tar.gz
+*.whl
+*.deb
+*.stp
+*.step
+*.stl
+
+# Training artifacts
+checkpoints/
+videos/
+demos.pkl
+transitions_*.pkl
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Personal config
+.claude/
