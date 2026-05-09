@@ -216,8 +216,10 @@ class MarvinServer:
         self.q = np.array(out["fb_joint_pos"]) * DEG2RAD
         self.dq = np.array(out["fb_joint_vel"]) * DEG2RAD
 
-        # Force/torque from blue-dot sensor
-        cart_fn = out.get("est_cart_fn", [0.0] * 6)
+        # Force/torque: C++ method — fb_joint_them[i] / 10000
+        # (m_FB_Joint_Them is repurposed to carry 6D force data)
+        fb_joint_them = out.get("fb_joint_them", [0.0] * 7)
+        cart_fn = [fb_joint_them[i] / 10000.0 for i in range(6)]
         self.force = np.array(cart_fn[:3])
         self.torque = np.array(cart_fn[3:6])
 

@@ -22,13 +22,19 @@ class EnvConfig(DefaultMarvinEnvConfig):
     SERVER_URL = "http://127.0.0.1:5000/"
     REALSENSE_CAMERAS = {
         "wrist": {
-            "serial_number": "TODO_FILL_SERIAL",
+            "serial_number": "352122272331",
+            "dim": (640, 480),
+            "exposure": 40000,
+        },
+        "side": {
+            "serial_number": "352122271675",
             "dim": (640, 480),
             "exposure": 40000,
         },
     }
     IMAGE_CROP = {
         "wrist": lambda img: img[100:400, 200:500],
+        "side": lambda img: img[100:500, 150:1100],
     }
     # TODO: measure actual target and reset poses from robot
     TARGET_POSE = np.array([0.4, 0.0, 0.2, np.pi, 0, 0])
@@ -54,8 +60,8 @@ class EnvConfig(DefaultMarvinEnvConfig):
 
 
 class TrainConfig(DefaultTrainingConfig):
-    image_keys = ["wrist"]
-    classifier_keys = ["wrist"]
+    image_keys = ["wrist", "side"]
+    classifier_keys = ["wrist", "side"]
     proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque"]
     buffer_period = 1000
     checkpoint_period = 5000
