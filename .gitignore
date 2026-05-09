@@ -30,3 +30,4 @@ Thumbs.db
 
 # Personal config
 .claude/
+*.pdf
