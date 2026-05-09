@@ -38,8 +38,10 @@ RAD2DEG = 180.0 / np.pi
 NUM_JOINTS = 6
 
 # Real-time data struct offsets (packed, no padding)
+# Refer to dobot_api.py MyType for full struct layout.
 # uint16_t len at 0
 # uint64_t robot_mode at 24
+# uint64_t test_value at 48 — magic 0x123456789abcdef for frame validation
 # double q_actual[6] at 432
 # double qd_actual[6] at 480
 # double tool_vector_actual[6] at 624 — [x,y,z,rx,ry,rz] (mm, deg)
@@ -47,8 +49,10 @@ NUM_JOINTS = 6
 # double TCP_force[6] at 720 — current-based estimation
 # double SixForceValue[6] at 1304 — 6-axis force sensor
 # double ActualQuaternion[4] at 1384 — [w,x,y,z]
+# uint64_t current_command_id at 1112
 RT_HEADER = 0
 RT_ROBOT_MODE = 24
+RT_TEST_VALUE = 48
 RT_Q_ACTUAL = 432
 RT_QD_ACTUAL = 480
 RT_TOOL_VECTOR = 624
@@ -56,6 +60,7 @@ RT_TCP_SPEED = 672
 RT_TCP_FORCE = 720
 RT_SIX_FORCE = 1304
 RT_ACTUAL_QUAT = 1384
+RT_CURRENT_COMMAND_ID = 1112
 
 
 def _recv_exact(sock: socket.socket, n: int, timeout: float = 3.0) -> bytes:
@@ -101,8 +106,14 @@ def _dashboard_cmd_no_wait(ip: str, port: int, cmd: str):
         sock.close()
 
 
-def _parse_rt_data(data: bytes) -> dict:
-    """Parse the 1440-byte real-time data struct into a dict."""
+RT_FRAME_MAGIC = 0x123456789abcdef
+
+
+def _parse_rt_data(data: bytes) -> dict | None:
+    """Parse the 1440-byte real-time data struct into a dict.
+
+    Returns None if the frame magic (TestValue) is invalid.
+    """
     def _doubles(offset: int, count: int = 6) -> list:
         return list(struct.unpack_from("<" + "d" * count, data, offset))
 
@@ -110,6 +121,11 @@ def _parse_rt_data(data: bytes) -> dict:
     rt_len = fields[0]
     if rt_len != 1440:
         raise ValueError(f"Unexpected RT data length: {rt_len}")
+
+    # Validate frame magic
+    test_val = struct.unpack_from("<Q", data, RT_TEST_VALUE)[0]
+    if test_val != RT_FRAME_MAGIC:
+        return None
 
     return {
         "robot_mode": struct.unpack_from("<Q", data, RT_ROBOT_MODE)[0],
@@ -120,6 +136,7 @@ def _parse_rt_data(data: bytes) -> dict:
         "tcp_force": _doubles(RT_TCP_FORCE),
         "six_force": _doubles(RT_SIX_FORCE),
         "actual_quat": _doubles(RT_ACTUAL_QUAT, 4),  # [w,x,y,z]
+        "current_command_id": struct.unpack_from("<Q", data, RT_CURRENT_COMMAND_ID)[0],
     }
 
 
@@ -145,6 +162,8 @@ class CR5AFServer:
         self.dq = np.zeros(NUM_JOINTS)    # joint velocities (rad/s)
         self.gripper_pos = 1.0
         self.robot_mode = 0
+        self.current_command_id = 0
+        self.six_force = np.zeros(6)       # six-axis force sensor (N, Nm)
         self._connected = False
 
         # Connect to real-time data feed
@@ -197,6 +216,10 @@ class CR5AFServer:
                     time.sleep(1.0)
                     continue
 
+            if rt is None:
+                # Invalid frame magic, skip
+                continue
+
             with self.lock:
                 self.robot_mode = rt["robot_mode"]
 
@@ -223,8 +246,14 @@ class CR5AFServer:
                 self.q = np.array(rt["q_actual"]) * DEG2RAD
                 self.dq = np.array(rt["qd_actual"]) * DEG2RAD
 
+                # Current command ID for movement tracking
+                self.current_command_id = rt["current_command_id"]
+
+                # Six-axis force sensor data (from SixForceValue)
+                self.six_force = np.array(rt["six_force"])
+
     def _enable_robot(self):
-        """Enable robot and set speed."""
+        """Enable robot and set speed/acceleration."""
         try:
             resp = _dashboard_cmd(self.robot_ip, self.dashboard_port,
                                   "EnableRobot()")
@@ -233,6 +262,12 @@ class CR5AFServer:
             resp = _dashboard_cmd(self.robot_ip, self.dashboard_port,
                                   f"SpeedFactor({int(self.speed_pct)})")
             print(f"SpeedFactor: {resp}")
+            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port,
+                                  f"AccL({int(self.accel_pct)})")
+            print(f"AccL: {resp}")
+            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port,
+                                  f"VelL({int(self.speed_pct)})")
+            print(f"VelL: {resp}")
         except Exception as e:
             print(f"Warning: EnableRobot failed: {e}")
 
@@ -245,7 +280,7 @@ class CR5AFServer:
             pass
 
     def clear_error(self):
-        """Clear robot errors."""
+        """Clear robot errors and re-enable."""
         try:
             _dashboard_cmd(self.robot_ip, self.dashboard_port,
                            "ClearError()")
@@ -253,8 +288,35 @@ class CR5AFServer:
             _dashboard_cmd(self.robot_ip, self.dashboard_port,
                            "EnableRobot()")
             time.sleep(0.5)
+            _dashboard_cmd(self.robot_ip, self.dashboard_port,
+                           f"SpeedFactor({int(self.speed_pct)})")
+            _dashboard_cmd(self.robot_ip, self.dashboard_port,
+                           f"AccL({int(self.accel_pct)})")
         except Exception as e:
             print(f"ClearError failed: {e}")
+
+    def get_error(self, language: str = "en") -> str:
+        """Get robot error/alarm information."""
+        try:
+            return _dashboard_cmd(self.robot_ip, self.dashboard_port,
+                                  f"GetError({language})")
+        except Exception as e:
+            return f"GetError failed: {e}"
+
+    def move_to_joint(self, joint_deg: np.ndarray):
+        """Move to joint position [j1..j6] in degrees via MovJ."""
+        cmd = (
+            "MovJ(joint={"
+            f"{joint_deg[0]:.3f},{joint_deg[1]:.3f},{joint_deg[2]:.3f},"
+            f"{joint_deg[3]:.3f},{joint_deg[4]:.3f},{joint_deg[5]:.3f}"
+            "})"
+        )
+        try:
+            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
+            if resp and resp[0] != '0':
+                print(f"MovJ error: {resp}")
+        except Exception as e:
+            print(f"MovJ failed: {e}")
 
     def move_to_pose(self, pose: np.ndarray):
         """Move to Cartesian pose [x,y,z, qx,qy,qz,qw] via MovL."""
@@ -268,8 +330,12 @@ class CR5AFServer:
         y_mm = xyz_m[1] * M_TO_MM
         z_mm = xyz_m[2] * M_TO_MM
 
-        cmd = f"MovL({x_mm:.3f},{y_mm:.3f},{z_mm:.3f}," \
-              f"{rxyz_deg[0]:.3f},{rxyz_deg[1]:.3f},{rxyz_deg[2]:.3f})"
+        cmd = (
+            "MovL(pose={"
+            f"{x_mm:.3f},{y_mm:.3f},{z_mm:.3f},"
+            f"{rxyz_deg[0]:.3f},{rxyz_deg[1]:.3f},{rxyz_deg[2]:.3f}"
+            "})"
+        )
 
         try:
             resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
@@ -284,9 +350,13 @@ class CR5AFServer:
         quat = pose[3:7]
         rot = R.from_quat(quat)
         rxyz_deg = rot.as_euler("XYZ", degrees=True)
-        cmd = f"MovL({xyz_m[0]*M_TO_MM:.3f},{xyz_m[1]*M_TO_MM:.3f}," \
-              f"{xyz_m[2]*M_TO_MM:.3f},{rxyz_deg[0]:.3f}," \
-              f"{rxyz_deg[1]:.3f},{rxyz_deg[2]:.3f})"
+        cmd = (
+            "MovL(pose={"
+            f"{xyz_m[0]*M_TO_MM:.3f},{xyz_m[1]*M_TO_MM:.3f},"
+            f"{xyz_m[2]*M_TO_MM:.3f},{rxyz_deg[0]:.3f},"
+            f"{rxyz_deg[1]:.3f},{rxyz_deg[2]:.3f}"
+            "})"
+        )
         _dashboard_cmd_no_wait(self.robot_ip, self.dashboard_port, cmd)
 
     def update_state(self):
@@ -298,7 +368,7 @@ class CR5AFServer:
         """Reset to home joint position via joint move."""
         # MovJ to a vertical home position (adjust for your setup)
         # Default home: all joints at 0 (upright position)
-        cmd = "MovJ(0,0,0,0,0,0)"
+        cmd = "MovJ(joint={0,0,0,0,0,0})"
         try:
             _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
         except Exception as e:
@@ -312,6 +382,100 @@ class CR5AFServer:
                 self._rt_sock.close()
             except Exception:
                 pass
+
+    # ── Force Control (FC) mode ──────────────────────────────────────────
+
+    def fc_force_mode(self, directions: list[int], target_forces: list[int],
+                      reference: int = -1, user: int = -1, tool: int = -1) -> str:
+        """Start force control with per-direction enable flags and target forces.
+
+        directions:   6 ints [0|1] per axis (x,y,z,rx,ry,rz) — 1=enabled
+        target_forces: 6 ints — target force per axis (N for xyz, N/m for rz)
+        """
+        dir_str = "{" + ",".join(str(d) for d in directions) + "}"
+        f_str = "{" + ",".join(str(f) for f in target_forces) + "}"
+        cmd = f"FCForceMode({dir_str},{f_str}"
+        if reference != -1:
+            cmd += f",reference={reference}"
+        if user != -1:
+            cmd += f",user={user}"
+        if tool != -1:
+            cmd += f",tool={tool}"
+        cmd += ")"
+        try:
+            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
+            print(f"FCForceMode: {resp}")
+            return resp
+        except Exception as e:
+            msg = f"FCForceMode failed: {e}"
+            print(msg)
+            return msg
+
+    def fc_set_stiffness(self, vals: list[float]) -> str:
+        """Set stiffness (elastic coefficient) per axis [kx,ky,kz,krx,kry,krz]."""
+        cmd = "FCSetStiffness(" + ",".join(f"{v}" for v in vals) + ")"
+        return self._fc_cmd("FCSetStiffness", cmd)
+
+    def fc_set_damping(self, vals: list[float]) -> str:
+        """Set damping coefficient per axis [dx,dy,dz,drx,dry,drz]."""
+        cmd = "FCSetDamping(" + ",".join(f"{v}" for v in vals) + ")"
+        return self._fc_cmd("FCSetDamping", cmd)
+
+    def fc_set_mass(self, vals: list[float]) -> str:
+        """Set mass/inertia coefficient per axis [mx,my,mz,mrx,mry,mrz]."""
+        cmd = "FCSetMass(" + ",".join(f"{v}" for v in vals) + ")"
+        return self._fc_cmd("FCSetMass", cmd)
+
+    def fc_set_force_limit(self, vals: list[float]) -> str:
+        """Set max force limit per axis [x,y,z,rx,ry,rz]."""
+        cmd = "FCSetForceLimit(" + ",".join(f"{v}" for v in vals) + ")"
+        return self._fc_cmd("FCSetForceLimit", cmd)
+
+    def fc_set_force_speed_limit(self, vals: list[int]) -> str:
+        """Set force control adjustment speed per axis [x,y,z,rx,ry,rz]."""
+        cmd = "FCSetForceSpeedLimit(" + ",".join(str(v) for v in vals) + ")"
+        return self._fc_cmd("FCSetForceSpeedLimit", cmd)
+
+    def fc_set_force(self, vals: list[float]) -> str:
+        """Adjust target force in real-time [fx,fy,fz,frx,fry,frz]."""
+        cmd = "FCSetForce(" + ",".join(f"{v}" for v in vals) + ")"
+        return self._fc_cmd("FCSetForce", cmd)
+
+    def fc_off(self) -> str:
+        """Exit force control mode."""
+        try:
+            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, "FCOff()")
+            print(f"FCOff: {resp}")
+            return resp
+        except Exception as e:
+            msg = f"FCOff failed: {e}"
+            print(msg)
+            return msg
+
+    def six_force_home(self) -> str:
+        """Tare the six-axis force sensor."""
+        try:
+            return _dashboard_cmd(self.robot_ip, self.dashboard_port, "SixForceHome()")
+        except Exception as e:
+            return f"SixForceHome failed: {e}"
+
+    def get_force_sensor(self, tool: int = -1) -> str:
+        """Read six-axis force sensor values."""
+        cmd = "GetForce()" if tool == -1 else f"GetForce({tool})"
+        try:
+            return _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
+        except Exception as e:
+            return f"GetForce failed: {e}"
+
+    def _fc_cmd(self, name: str, cmd: str) -> str:
+        """Send an FC command and return the response."""
+        try:
+            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
+            return resp
+        except Exception as e:
+            msg = f"{name} failed: {e}"
+            print(msg)
+            return msg
 
 
 def main(argv):
@@ -345,6 +509,9 @@ def main(argv):
             "dq": server.dq.tolist(),
             "jacobian": np.zeros((6, 6)).tolist(),
             "gripper_pos": server.gripper_pos,
+            "robot_mode": server.robot_mode,
+            "current_command_id": server.current_command_id,
+            "six_force": server.six_force.tolist(),
         })
 
     @webapp.route("/getpos", methods=["POST"])
@@ -410,21 +577,125 @@ def main(argv):
         err = _require_not_safe()
         if err:
             return err
-        return "Started impedance (no-op on CR5AF)"
+        # Default FC mode: all directions enabled, zero target force (pure compliance)
+        body = request.json or {}
+        directions = body.get("directions", [1, 1, 1, 1, 1, 1])
+        target_forces = body.get("target_forces", [0, 0, 0, 0, 0, 0])
+        stiffness = body.get("stiffness", None)
+        damping = body.get("damping", None)
+
+        if stiffness:
+            server.fc_set_stiffness(stiffness)
+        if damping:
+            server.fc_set_damping(damping)
+
+        resp = server.fc_force_mode(directions, target_forces)
+        return jsonify({"fc_mode": resp})
 
     @webapp.route("/stopimp", methods=["POST"])
     def stop_impedance():
         err = _require_not_safe()
         if err:
             return err
-        return "Stopped impedance (no-op on CR5AF)"
+        resp = server.fc_off()
+        return jsonify({"fc_off": resp})
 
     @webapp.route("/update_param", methods=["POST"])
     def update_param():
         err = _require_not_safe()
         if err:
             return err
-        return "Updated compliance parameters (no-op on CR5AF)"
+        body = request.json or {}
+        results = {}
+        if "stiffness" in body:
+            results["stiffness"] = server.fc_set_stiffness(body["stiffness"])
+        if "damping" in body:
+            results["damping"] = server.fc_set_damping(body["damping"])
+        if "mass" in body:
+            results["mass"] = server.fc_set_mass(body["mass"])
+        if "force_limit" in body:
+            results["force_limit"] = server.fc_set_force_limit(body["force_limit"])
+        if "target_forces" in body:
+            results["target_force"] = server.fc_set_force(body["target_forces"])
+        return jsonify(results) if results else "No params updated"
+
+    @webapp.route("/geterror", methods=["POST"])
+    def get_error():
+        lang = request.json.get("language", "en") if request.json else "en"
+        resp = server.get_error(language=lang)
+        return jsonify({"error_info": resp})
+
+    @webapp.route("/movej", methods=["POST"])
+    def move_joint():
+        err = _require_not_safe()
+        if err:
+            return err
+        joint_deg = np.array(request.json["arr"])
+        server.move_to_joint(joint_deg)
+        return "Moved Joint"
+
+    # ── Force Control (FC) optional routes ───────────────────────────────
+
+    @webapp.route("/fc_force_mode", methods=["POST"])
+    def fc_force_mode():
+        err = _require_not_safe()
+        if err:
+            return err
+        body = request.json
+        resp = server.fc_force_mode(
+            body.get("directions", [1, 1, 1, 1, 1, 1]),
+            body.get("target_forces", [0, 0, 0, 0, 0, 0]),
+            reference=body.get("reference", -1),
+            user=body.get("user", -1),
+            tool=body.get("tool", -1),
+        )
+        return jsonify({"fc_force_mode": resp})
+
+    @webapp.route("/set_stiffness", methods=["POST"])
+    def set_stiffness():
+        err = _require_not_safe()
+        if err:
+            return err
+        resp = server.fc_set_stiffness(request.json["values"])
+        return jsonify({"stiffness": resp})
+
+    @webapp.route("/set_damping", methods=["POST"])
+    def set_damping():
+        err = _require_not_safe()
+        if err:
+            return err
+        resp = server.fc_set_damping(request.json["values"])
+        return jsonify({"damping": resp})
+
+    @webapp.route("/fc_set_force", methods=["POST"])
+    def fc_set_force():
+        err = _require_not_safe()
+        if err:
+            return err
+        resp = server.fc_set_force(request.json["values"])
+        return jsonify({"target_force": resp})
+
+    @webapp.route("/fc_off", methods=["POST"])
+    def fc_off():
+        err = _require_not_safe()
+        if err:
+            return err
+        resp = server.fc_off()
+        return jsonify({"fc_off": resp})
+
+    @webapp.route("/force_home", methods=["POST"])
+    def force_home():
+        err = _require_not_safe()
+        if err:
+            return err
+        resp = server.six_force_home()
+        return jsonify({"six_force_home": resp})
+
+    @webapp.route("/get_force_sensor", methods=["POST"])
+    def get_force_sensor():
+        tool = request.json.get("tool", -1) if request.json else -1
+        resp = server.get_force_sensor(tool=tool)
+        return jsonify({"force_sensor": resp})
 
     @webapp.route("/open_gripper", methods=["POST"])
     def open_gripper():
