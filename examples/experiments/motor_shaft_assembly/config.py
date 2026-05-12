@@ -17,7 +17,7 @@ from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.networks.reward_classifier import load_classifier_func
 
 from experiments.config import DefaultTrainingConfig
-from experiments.peg_in_hole_assembly.wrapper import PegInHoleEnv, GripperPenaltyWrapper
+from experiments.motor_shaft_assembly.wrapper import PegInHoleEnv, GripperPenaltyWrapper
 
 
 class EnvConfig(DefaultMarvinEnvConfig):

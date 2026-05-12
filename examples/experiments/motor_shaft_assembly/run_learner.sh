@@ -9,7 +9,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 python examples/train_rlpd.py \
     --learner \
-    --exp_name=peg_in_hole_assembly \
+    --exp_name=motor_shaft_assembly \
     --ip=0.0.0.0 \
-    --checkpoint_path=experiments/peg_in_hole_assembly/checkpoints \
-    --demo_path=experiments/peg_in_hole_assembly/demos.pkl
+    --checkpoint_path=experiments/motor_shaft_assembly/checkpoints \
+    --demo_path=experiments/motor_shaft_assembly/demos.pkl

@@ -21,9 +21,9 @@ echo "Connecting to Learner at $LEARNER_IP"
 
 python examples/train_rlpd.py \
     --actor \
-    --exp_name=peg_in_hole_assembly \
+    --exp_name=motor_shaft_assembly \
     --ip=$LEARNER_IP \
-    --checkpoint_path=examples/experiments/peg_in_hole_assembly/checkpoints
+    --checkpoint_path=examples/experiments/motor_shaft_assembly/checkpoints
 
 # Cleanup
 kill $MARVIN_PID 2>/dev/null
