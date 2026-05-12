@@ -94,6 +94,10 @@ class MarvinServer:
         self.dq = np.zeros(7)       # joint velocities
         self.gripper_pos = 1.0      # no gripper = always open
 
+        # For finite-difference velocity estimation
+        self._prev_pos = None
+        self._prev_time = None
+
         if safe:
             print("SAFE MODE: reading state only, no motion commands will be sent")
         else:
@@ -226,9 +230,19 @@ class MarvinServer:
         # Cartesian pose via FK
         self.pos = self.get_cartesian_pose()
 
-        # TCP velocity (approximate from Jacobian if available)
-        # For now, use finite difference or zeros
-        self.vel = np.zeros(6)
+        # TCP velocity via finite difference of pose
+        now = time.time()
+        if self._prev_pos is not None and self._prev_time is not None:
+            dt = now - self._prev_time
+            if dt > 1e-6:
+                self.vel[:3] = (self.pos[:3] - self._prev_pos[:3]) / dt
+                # Angular velocity from quaternion difference
+                prev_rot = R.from_quat(self._prev_pos[3:])
+                curr_rot = R.from_quat(self.pos[3:])
+                delta_rot = curr_rot * prev_rot.inv()
+                self.vel[3:] = delta_rot.as_rotvec() / dt
+        self._prev_pos = self.pos.copy()
+        self._prev_time = now
 
     def clear_error(self):
         """Clear robot errors."""
