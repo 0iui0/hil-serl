@@ -30,6 +30,11 @@ flags.DEFINE_integer("flask_port", 5000, "Flask port")
 flags.DEFINE_boolean("safe", False, "Safe mode: read-only, no motion commands")
 flags.DEFINE_float("speed", 50.0, "Motion speed percentage (0-100)")
 flags.DEFINE_float("acceleration", 50.0, "Motion acceleration percentage (0-100)")
+flags.DEFINE_list(
+    "reset_joint_target",
+    [0, 0, 0, -90, 0, 45],
+    "Home joint angles in degrees for jointreset",
+)
 
 MM_TO_M = 0.001
 M_TO_MM = 1000.0
@@ -365,10 +370,13 @@ class CR5AFServer:
             pass  # state is already up-to-date from RT loop
 
     def reset_joint(self):
-        """Reset to home joint position via joint move."""
-        # MovJ to a vertical home position (adjust for your setup)
-        # Default home: all joints at 0 (upright position)
-        cmd = "MovJ(joint={0,0,0,0,0,0})"
+        """Reset to home joint position via MovJ."""
+        joints = FLAGS.reset_joint_target
+        cmd = (
+            "MovJ(joint={"
+            + ",".join(str(float(j)) for j in joints)
+            + "})"
+        )
         try:
             _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
         except Exception as e:
@@ -565,30 +573,37 @@ def main(argv):
 
     @webapp.route("/pose", methods=["POST"])
     def pose():
+        """Move to Cartesian pose. Uses no-wait MovL for continuous control."""
         err = _require_not_safe()
         if err:
             return err
         pos = np.array(request.json["arr"])
-        server.move_to_pose(pos)
+        server.move_to_pose_no_wait(pos)
         return "Moved"
 
     @webapp.route("/startimp", methods=["POST"])
     def start_impedance():
+        """Start FC-based impedance-like mode.
+
+        Configures FC with zero target forces (pure compliance).
+        Stiffness/damping provide spring-damper behavior similar to
+        Franka's cartesian_impedance_controller.
+        MovL commands sent during FC mode act as equilibrium pose changes.
+        """
         err = _require_not_safe()
         if err:
             return err
-        # Default FC mode: all directions enabled, zero target force (pure compliance)
         body = request.json or {}
-        directions = body.get("directions", [1, 1, 1, 1, 1, 1])
-        target_forces = body.get("target_forces", [0, 0, 0, 0, 0, 0])
-        stiffness = body.get("stiffness", None)
-        damping = body.get("damping", None)
 
-        if stiffness:
-            server.fc_set_stiffness(stiffness)
-        if damping:
-            server.fc_set_damping(damping)
+        # Set compliance parameters before entering FC mode
+        stiffness = body.get("stiffness", [500, 500, 500, 30, 30, 30])
+        damping = body.get("damping", [10, 10, 10, 1, 1, 1])
+        server.fc_set_stiffness(stiffness)
+        server.fc_set_damping(damping)
 
+        # FC mode: all directions compliant, zero target force
+        directions = [1, 1, 1, 1, 1, 1]
+        target_forces = [0, 0, 0, 0, 0, 0]
         resp = server.fc_force_mode(directions, target_forces)
         return jsonify({"fc_mode": resp})
 
