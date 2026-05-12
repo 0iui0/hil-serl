@@ -11,5 +11,5 @@ python examples/train_rlpd.py \
     --learner \
     --exp_name=motor_shaft_assembly \
     --ip=0.0.0.0 \
-    --checkpoint_path=experiments/motor_shaft_assembly/checkpoints \
-    --demo_path=experiments/motor_shaft_assembly/demos.pkl
+    --checkpoint_path=experiments/motor_shaft_assembly/marvin/checkpoints \
+    --demo_path=experiments/motor_shaft_assembly/marvin/demos.pkl
