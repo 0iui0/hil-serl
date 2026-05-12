@@ -17,7 +17,7 @@ from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.networks.reward_classifier import load_classifier_func
 
 from experiments.config import DefaultTrainingConfig
-from experiments.motor_shaft_assembly.wrapper import MotorShaftEnv, GripperPenaltyWrapper
+from experiments.motor_shaft_assembly.cr5af.wrapper import MotorShaftEnv, GripperPenaltyWrapper
 
 
 # TODO: fill in real values when CR5AF is connected and workspace is calibrated
