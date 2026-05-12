@@ -17,7 +17,7 @@ from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.networks.reward_classifier import load_classifier_func
 
 from experiments.config import DefaultTrainingConfig
-from experiments.motor_shaft_assembly.wrapper import MotorShaftEnv
+from experiments.motor_shaft_assembly.wrapper import MotorShaftEnv, GripperPenaltyWrapper
 
 
 # TODO: fill in real values when CR5AF is connected and workspace is calibrated
@@ -41,8 +41,9 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     }
 
     # TODO: calibrate with real robot
-    TARGET_POSE = np.zeros((6,))
-    RESET_POSE = np.zeros((6,))
+    TARGET_POSE = np.zeros((6,))        # Insertion pose (hole position)
+    GRASP_POSE = np.zeros((6,))         # Shaft holder position (for learned-gripper mode)
+    RESET_POSE = np.zeros((6,))         # Start pose above hole
     REWARD_THRESHOLD = np.zeros((6,))
     ACTION_SCALE = (0.01, 0.06, 1)
     ABS_POSE_LIMIT_LOW = np.zeros((6,))
@@ -52,10 +53,13 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     RANDOM_XY_RANGE = 0.02
     RANDOM_RZ_RANGE = 0.05
     DISPLAY_IMAGE = True
-    MAX_EPISODE_LENGTH = 100
+    MAX_EPISODE_LENGTH = 120            # Longer than RAM (100) due to grasp + insert
+
+    # Gripper mode switch
+    USE_GRIPPER = False                 # False = fixed-flange (current), True = learned-gripper (future)
+    GRASP_FORCE_THRESHOLD = 2.0         # N, minimum force to confirm grasp
 
     # FC impedance params (CR5AF FC mode stiffness/damping)
-    # Mapped from Franka impedance params — tune on real robot
     COMPLIANCE_PARAM = {
         "stiffness": [500, 500, 500, 30, 30, 30],
         "damping": [10, 10, 10, 1, 1, 1],
@@ -74,7 +78,9 @@ class TrainConfig(DefaultTrainingConfig):
     checkpoint_period = 5000
     steps_per_update = 50
     encoder_type = "resnet-pretrained"
-    setup_mode = "single-arm-fixed-gripper"
+    # Auto-switch training mode based on gripper availability
+    setup_mode = "single-arm-learned-gripper" if EnvConfig.USE_GRIPPER else "single-arm-fixed-gripper"
+    gripper_penalty = -0.05
 
     def get_environment(self, fake_env=False, save_video=False, classifier=False):
         env = MotorShaftEnv(
@@ -82,13 +88,19 @@ class TrainConfig(DefaultTrainingConfig):
             save_video=save_video,
             config=EnvConfig(),
         )
-        env = GripperCloseEnv(env)
+
+        # Fixed-flange: mask out gripper action
+        if not EnvConfig.USE_GRIPPER:
+            env = GripperCloseEnv(env)
+
         if not fake_env:
             env = SpacemouseIntervention(env)
+
         env = RelativeFrame(env)
         env = Quat2EulerWrapper(env)
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
+
         if classifier:
             classifier = load_classifier_func(
                 key=jax.random.PRNGKey(0),
@@ -102,4 +114,9 @@ class TrainConfig(DefaultTrainingConfig):
                 return int(sigmoid(classifier(obs)) > 0.85 and obs['state'][0, 6] > 0.04)
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
+
+        # Learned-gripper: add penalty for unnecessary gripper toggling
+        if EnvConfig.USE_GRIPPER:
+            env = GripperPenaltyWrapper(env, penalty=self.gripper_penalty)
+
         return env
