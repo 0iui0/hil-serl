@@ -118,10 +118,10 @@ class MarvinEnv(gym.Env):
             dtype=np.float64,
         )
 
-        # Action: 6D for peg-in-hole (no gripper)
+        # Action: 7D (same as FrankaEnv for wrapper compatibility)
         self.action_space = gym.spaces.Box(
-            np.ones((6,), dtype=np.float32) * -1,
-            np.ones((6,), dtype=np.float32),
+            np.ones((7,), dtype=np.float32) * -1,
+            np.ones((7,), dtype=np.float32),
         )
 
         # Observation space matches FrankaEnv exactly
@@ -204,6 +204,8 @@ class MarvinEnv(gym.Env):
             * Rotation.from_quat(self.currpos[3:])
         ).as_quat()
 
+        gripper_action = action[6] * self.action_scale[2]
+        self._send_gripper_command(gripper_action)
         self._send_pos_command(self.clip_safety_box(self.nextpos))
 
         self.curr_path_length += 1
@@ -335,6 +337,18 @@ class MarvinEnv(gym.Env):
         self._recover()
         arr = np.array(pos).astype(np.float32)
         requests.post(self.url + "pose", json={"arr": arr.tolist()})
+
+    def _send_gripper_command(self, pos: float, mode="binary"):
+        """Gripper command — no-op until gripper hardware is connected."""
+        if mode == "binary":
+            if (pos <= -0.5) and (self.curr_gripper_pos > 0.85) and (time.time() - self.last_gripper_act > self.gripper_sleep):
+                requests.post(self.url + "close_gripper")
+                self.last_gripper_act = time.time()
+                time.sleep(self.gripper_sleep)
+            elif (pos >= 0.5) and (self.curr_gripper_pos < 0.85) and (time.time() - self.last_gripper_act > self.gripper_sleep):
+                requests.post(self.url + "open_gripper")
+                self.last_gripper_act = time.time()
+                time.sleep(self.gripper_sleep)
 
     def _update_currpos(self):
         ps = requests.post(self.url + "getstate").json()
