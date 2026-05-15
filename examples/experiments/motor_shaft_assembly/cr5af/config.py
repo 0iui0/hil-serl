@@ -23,21 +23,16 @@ from experiments.motor_shaft_assembly.cr5af.wrapper import MotorShaftEnv, Grippe
 # TODO: fill in real values when CR5AF is connected and workspace is calibrated
 class EnvConfig(DefaultCR5AFEnvConfig):
     SERVER_URL = "http://127.0.0.1:5000/"
+    # Single external camera (hand-eye). Add more entries for additional cameras.
     REALSENSE_CAMERAS = {
-        "wrist_1": {
+        "external": {
             "serial_number": "TBD",  # TODO: D405 serial on Jetson Thor
-            "dim": (1280, 720),
-            "exposure": 40000,
-        },
-        "wrist_2": {
-            "serial_number": "TBD",  # TODO: D405 serial on Jetson Thor
-            "dim": (1280, 720),
+            "dim": (640, 480),
             "exposure": 40000,
         },
     }
     IMAGE_CROP = {
-        "wrist_1": lambda img: img[150:450, 350:1100],
-        "wrist_2": lambda img: img[100:500, 400:900],
+        "external": lambda img: img[100:400, 150:500],
     }
 
     # TODO: calibrate with real robot
@@ -71,8 +66,8 @@ class EnvConfig(DefaultCR5AFEnvConfig):
 
 
 class TrainConfig(DefaultTrainingConfig):
-    image_keys = ["wrist_1", "wrist_2"]
-    classifier_keys = ["wrist_1", "wrist_2"]
+    image_keys = ["external"]
+    classifier_keys = ["external"]
     proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
     buffer_period = 1000
     checkpoint_period = 5000
