@@ -242,6 +242,8 @@ def make_wandb_logger(
     project: str = "hil-serl",
     description: str = "serl_launcher",
     debug: bool = False,
+    sync_tensorboard: bool = True,
+    tensorboard_log_dir: str = None,
 ):
     wandb_config = WandBLogger.get_default_config()
     wandb_config.update(
@@ -255,5 +257,7 @@ def make_wandb_logger(
         wandb_config=wandb_config,
         variant={},
         debug=debug,
+        sync_tensorboard=sync_tensorboard,
+        tensorboard_log_dir=tensorboard_log_dir,
     )
     return wandb_logger

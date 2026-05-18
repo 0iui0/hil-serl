@@ -1,0 +1,2 @@
+# Allow plugdev group to access 3Dconnexion SpaceMouse devices
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="256f", MODE="0664", GROUP="plugdev"

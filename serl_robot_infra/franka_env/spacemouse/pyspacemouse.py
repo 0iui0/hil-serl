@@ -218,10 +218,13 @@ class DeviceSpec(object):
         """
         if not self.connected:
             return None
-        # read bytes from SpaceMouse
+        # read bytes from SpaceMouse (nonblocking)
         ret = self.device.read(self.__bytes_to_read)
-        # test for nonblocking read
-        if (ret):
+        # Fallback: some devices (e.g. c63a wired) return empty on nonblocking
+        # but work with a short timeout
+        if not ret:
+            ret = self.device.read(self.__bytes_to_read, timeout=50)
+        if ret:
             self.process(ret)
         return self.tuple_state
 
@@ -532,6 +535,26 @@ device_specs = {
             ButtonSpec(channel=3, byte=1, bit=0),  # LEFT
             ButtonSpec(channel=3, byte=1, bit=1),  # RIGHT
         ],  # FIT
+        axis_scale=350.0,
+    ),
+    "SpaceMouse Wireless BT": DeviceSpec(
+        name="SpaceMouse Wireless BT",
+        # vendor ID and product ID
+        hid_id=[0x256F, 0xC63A],
+        # LED HID usage code pair
+        led_id=[0x8, 0x4B],
+        mappings={
+            "x": AxisSpec(channel=1, byte1=1, byte2=2, scale=1),
+            "y": AxisSpec(channel=1, byte1=3, byte2=4, scale=-1),
+            "z": AxisSpec(channel=1, byte1=5, byte2=6, scale=-1),
+            "pitch": AxisSpec(channel=1, byte1=7, byte2=8, scale=-1),
+            "roll": AxisSpec(channel=1, byte1=9, byte2=10, scale=-1),
+            "yaw": AxisSpec(channel=1, byte1=11, byte2=12, scale=1),
+        },
+        button_mapping=[
+            ButtonSpec(channel=3, byte=1, bit=0),  # LEFT
+            ButtonSpec(channel=3, byte=1, bit=1),  # RIGHT
+        ],
         axis_scale=350.0,
     ),
     "3Dconnexion Universal Receiver": DeviceSpec(

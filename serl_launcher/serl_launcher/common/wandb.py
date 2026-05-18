@@ -1,11 +1,19 @@
 import datetime
+import os
 import tempfile
 from copy import copy
 from socket import gethostname
 
 import absl.flags as flags
 import ml_collections
+import numpy as np
 import wandb
+
+try:
+    import tensorflow as tf
+    _HAS_TF = True
+except ImportError:
+    _HAS_TF = False
 
 
 def _recursive_flatten_dict(d: dict):
@@ -41,6 +49,8 @@ class WandBLogger(object):
         variant,
         wandb_output_dir=None,
         debug=False,
+        sync_tensorboard=False,
+        tensorboard_log_dir=None,
     ):
         self.config = wandb_config
         if self.config.unique_identifier == "":
@@ -67,6 +77,14 @@ class WandBLogger(object):
         else:
             mode = "online"
 
+        self._tb_writer = None
+        self._sync_tensorboard = sync_tensorboard
+        if sync_tensorboard and _HAS_TF:
+            if tensorboard_log_dir is None:
+                tensorboard_log_dir = os.path.join(wandb_output_dir, "tensorboard")
+            os.makedirs(tensorboard_log_dir, exist_ok=True)
+            self._tb_writer = tf.summary.create_file_writer(tensorboard_log_dir)
+
         self.run = wandb.init(
             config=self._variant,
             project=self.config.project,
@@ -77,6 +95,7 @@ class WandBLogger(object):
             id=self.config.experiment_id,
             save_code=True,
             mode=mode,
+            sync_tensorboard=sync_tensorboard,
         )
 
         if flags.FLAGS.is_parsed():
@@ -92,3 +111,12 @@ class WandBLogger(object):
         data_flat = _recursive_flatten_dict(data)
         data = {k: v for k, v in zip(*data_flat)}
         wandb.log(data, step=step)
+
+        if self._tb_writer is not None and step is not None:
+            with self._tb_writer.as_default(step=step):
+                for k, v in data.items():
+                    try:
+                        scalar_val = float(v)
+                        tf.summary.scalar(k, scalar_val)
+                    except (TypeError, ValueError):
+                        pass

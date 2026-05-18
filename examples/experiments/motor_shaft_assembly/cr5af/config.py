@@ -26,7 +26,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     # Single external camera (hand-eye). Add more entries for additional cameras.
     REALSENSE_CAMERAS = {
         "external": {
-            "serial_number": "TBD",  # TODO: D405 serial on Jetson Thor
+            "serial_number": "333422302713",  # D455 on Jetson Thor
             "dim": (640, 480),
             "exposure": 40000,
         },
