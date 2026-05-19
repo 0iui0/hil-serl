@@ -23,7 +23,7 @@ from experiments.motor_shaft_assembly.cr5af.wrapper import (
 
 # TODO: fill in real values when CR5AF is connected and workspace is calibrated
 class EnvConfig(DefaultCR5AFEnvConfig):
-    SERVER_URL = "http://127.0.0.1:5000/"
+    SERVER_URL = "http://192.168.16.158:5000/"
     # Single external camera (hand-eye). Add more entries for additional cameras.
     REALSENSE_CAMERAS = {
         "external": {
@@ -79,11 +79,14 @@ class TrainConfig(DefaultTrainingConfig):
     setup_mode = "single-arm-learned-gripper" if EnvConfig.USE_GRIPPER else "single-arm-fixed-gripper"
     gripper_penalty = -0.05
 
-    def get_environment(self, fake_env=False, save_video=False, classifier=False):
+    def get_environment(self, fake_env=False, save_video=False, classifier=False, server_url=None):
+        env_config = EnvConfig()
+        if server_url is not None:
+            env_config.SERVER_URL = server_url
         env = MotorShaftEnv(
             fake_env=fake_env,
             save_video=save_video,
-            config=EnvConfig(),
+            config=env_config,
         )
 
         # Fixed-flange: mask out gripper action
@@ -91,7 +94,7 @@ class TrainConfig(DefaultTrainingConfig):
             env = GripperCloseEnv(env)
 
         if not fake_env:
-            env = ServerSpacemouseIntervention(env, server_url=EnvConfig.SERVER_URL)
+            env = ServerSpacemouseIntervention(env, server_url=env_config.SERVER_URL)
 
         env = RelativeFrame(env)
         env = Quat2EulerWrapper(env)

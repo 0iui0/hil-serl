@@ -59,7 +59,7 @@ class MotorShaftEnv(CR5AFEnv):
         time.sleep(0.5)
 
         # Move to precision mode for grasp
-        requests.post(self.url + "update_param", json=self.config.PRECISION_PARAM)
+        self._post("update_param", json=self.config.PRECISION_PARAM)
         time.sleep(0.3)
 
         # Move above grasp pose
@@ -96,7 +96,7 @@ class MotorShaftEnv(CR5AFEnv):
         self._update_currpos()
         self._send_pos_command(self.currpos)
         time.sleep(0.3)
-        requests.post(self.url + "update_param", json=self.config.PRECISION_PARAM)
+        self._post("update_param", json=self.config.PRECISION_PARAM)
         time.sleep(0.5)
 
         # Pull up to clear workpiece
@@ -107,7 +107,7 @@ class MotorShaftEnv(CR5AFEnv):
 
         if joint_reset:
             print("JOINT RESET")
-            requests.post(self.url + "jointreset")
+            self._post("jointreset")
             time.sleep(0.5)
 
         # Cartesian reset
@@ -126,7 +126,7 @@ class MotorShaftEnv(CR5AFEnv):
             self._send_pos_command(self.resetpos.copy())
         time.sleep(0.5)
 
-        requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
+        self._post("update_param", json=self.config.COMPLIANCE_PARAM)
 
     def compute_reward(self, obs) -> bool:
         """Reward: insertion success (pose + force threshold)."""
@@ -196,11 +196,13 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
         self.gripper_enabled = self.action_space.shape == (7,)
         self.left = False
         self.right = False
+        self._req_session = requests.Session()
+        self._req_session.trust_env = False
 
     def action(self, action: np.ndarray) -> tuple[np.ndarray, bool]:
         try:
-            resp = requests.post(
-                self.server_url + "get_spacemouse", timeout=0.1
+            resp = self._req_session.post(
+                self.server_url + "get_spacemouse", timeout=0.1,
             ).json()
             expert_a = np.array(resp["action"], dtype=np.float32)
             buttons = resp["buttons"]

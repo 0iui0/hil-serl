@@ -22,6 +22,14 @@ class RSCapture:
         self.s = self.profile.get_device().query_sensors()[0]
         self.s.set_option(rs.option.exposure, exposure)
 
+        # Warm up: wait for first frame to confirm pipeline is live
+        for _ in range(3):
+            try:
+                self.pipe.wait_for_frames(timeout_ms=10000)
+                break
+            except RuntimeError:
+                pass
+
         # Create an align object
         # rs.align allows us to perform alignment of depth frames to others frames
         # The "align_to" is the stream type to which we plan to align depth frames.

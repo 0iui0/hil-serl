@@ -23,7 +23,6 @@ import gymnasium as gym
 import requests
 from scipy.spatial.transform import Rotation as R
 
-from franka_env.camera.video_capture import VideoCapture
 from franka_env.camera.rs_capture import RSCapture
 from franka_env.utils.rotations import euler_2_quat, quat_2_euler
 
@@ -36,15 +35,28 @@ class ImageDisplayer(threading.Thread):
         self.name = name
 
     def run(self):
+        cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
+        first = True
         while True:
-            img_array = self.queue.get()
+            try:
+                img_array = self.queue.get(timeout=0.05)
+            except queue.Empty:
+                cv2.waitKey(10)
+                continue
             if img_array is None:
                 break
-            frame = np.concatenate(
-                [cv2.resize(v, (128, 128)) for k, v in img_array.items() if "full" not in k], axis=1
-            )
+            panels = []
+            for k, v in img_array.items():
+                if "full" in k:
+                    continue
+                full = img_array.get(k + "_full", v)
+                panels.append(full)
+            frame = np.concatenate(panels, axis=1)
             cv2.imshow(self.name, frame)
-            cv2.waitKey(1)
+            if first:
+                cv2.resizeWindow(self.name, frame.shape[1], frame.shape[0])
+                first = False
+            cv2.waitKey(10)
 
 
 class DefaultCR5AFEnvConfig:
@@ -227,21 +239,20 @@ class CR5AFEnv(gym.Env):
         display_images = {}
         full_res_images = {}
         for key, cap in self.cap.items():
-            try:
-                rgb = cap.read()
-                cropped_rgb = self.config.IMAGE_CROP[key](rgb) if key in self.config.IMAGE_CROP else rgb
-                resized = cv2.resize(
-                    cropped_rgb, self.observation_space["images"][key].shape[:2][::-1]
-                )
-                images[key] = resized[..., ::-1]
-                display_images[key] = resized
-                display_images[key + "_full"] = cropped_rgb
-                full_res_images[key] = copy.deepcopy(cropped_rgb)
-            except queue.Empty:
-                input(f"{key} camera frozen. Check connect, then press enter to relaunch...")
+            ret, rgb = cap.read()
+            if not ret:
+                input(f"{key} camera read failed. Check connect, then press enter to relaunch...")
                 cap.close()
                 self.init_cameras(self.config.REALSENSE_CAMERAS)
                 return self.get_im()
+            cropped_rgb = self.config.IMAGE_CROP[key](rgb) if key in self.config.IMAGE_CROP else rgb
+            resized = cv2.resize(
+                cropped_rgb, self.observation_space["images"][key].shape[:2][::-1]
+            )
+            images[key] = resized[..., ::-1]
+            display_images[key] = resized
+            display_images[key + "_full"] = cropped_rgb
+            full_res_images[key] = copy.deepcopy(cropped_rgb)
 
         if self.save_video:
             self.recording_frames.append(full_res_images)
@@ -266,7 +277,7 @@ class CR5AFEnv(gym.Env):
         self._update_currpos()
         self._send_pos_command(self.currpos)
         time.sleep(0.3)
-        requests.post(self.url + "update_param", json=self.config.PRECISION_PARAM)
+        self._post("update_param", json=self.config.PRECISION_PARAM)
         time.sleep(0.5)
 
         # Pull up above workpiece
@@ -277,7 +288,7 @@ class CR5AFEnv(gym.Env):
 
         if joint_reset:
             print("JOINT RESET")
-            requests.post(self.url + "jointreset")
+            self._post("jointreset")
             time.sleep(0.5)
 
         if self.randomreset:
@@ -295,7 +306,7 @@ class CR5AFEnv(gym.Env):
             self._send_pos_command(self.resetpos.copy())
         time.sleep(0.5)
 
-        requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
+        self._post("update_param", json=self.config.COMPLIANCE_PARAM)
 
     def reset(self, joint_reset=False, **kwargs):
         if self.fake_env:
@@ -304,7 +315,7 @@ class CR5AFEnv(gym.Env):
             return self._get_obs(), {"succeed": False}
 
         self.last_gripper_act = time.time()
-        requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
+        self._post("update_param", json=self.config.COMPLIANCE_PARAM)
         if self.save_video:
             self.save_video_recording()
 
@@ -349,8 +360,7 @@ class CR5AFEnv(gym.Env):
             self.close_cameras()
         self.cap = OrderedDict()
         for cam_name, kwargs in name_serial_dict.items():
-            cap = VideoCapture(RSCapture(name=cam_name, **kwargs))
-            self.cap[cam_name] = cap
+            self.cap[cam_name] = RSCapture(name=cam_name, **kwargs)
 
     def close_cameras(self):
         try:
@@ -360,32 +370,52 @@ class CR5AFEnv(gym.Env):
             print(f"Failed to close cameras: {e}")
 
     def _recover(self):
-        requests.post(self.url + "clearerr")
+        self._post("clearerr")
 
     def _send_pos_command(self, pos: np.ndarray):
         self._recover()
         arr = np.array(pos).astype(np.float32)
         data = {"arr": arr.tolist()}
-        requests.post(self.url + "pose", json=data)
+        self._post("pose", json=data)
 
     def _send_gripper_command(self, pos: float, mode="binary"):
         """Gripper commands are no-ops until gripper hardware is connected."""
         if mode == "binary":
             if (pos <= -0.5) and (self.curr_gripper_pos > 0.85) and (time.time() - self.last_gripper_act > self.gripper_sleep):
-                requests.post(self.url + "close_gripper")
+                self._post("close_gripper")
                 self.last_gripper_act = time.time()
                 time.sleep(self.gripper_sleep)
             elif (pos >= 0.5) and (self.curr_gripper_pos < 0.85) and (time.time() - self.last_gripper_act > self.gripper_sleep):
-                requests.post(self.url + "open_gripper")
+                self._post("open_gripper")
                 self.last_gripper_act = time.time()
                 time.sleep(self.gripper_sleep)
             else:
                 return
 
+    def _post(self, endpoint: str, **kwargs):
+        """POST to local server, bypassing any system proxy for localhost."""
+        kwargs.setdefault("timeout", 5)
+        if not hasattr(self, "_req_session"):
+            self._req_session = requests.Session()
+            self._req_session.trust_env = False
+        return self._req_session.post(self.url + endpoint, **kwargs)
+
     def _update_currpos(self):
         if self.fake_env:
             return
-        ps = requests.post(self.url + "getstate").json()
+        for attempt in range(5):
+            try:
+                r = self._post("getstate", timeout=5)
+                if r.status_code == 200 and r.text:
+                    ps = r.json()
+                    break
+                print(f"_update_currpos attempt {attempt}: status={r.status_code}, text_len={len(r.text)}, text={r.text[:200]}")
+            except Exception as e:
+                print(f"_update_currpos attempt {attempt}: {type(e).__name__}: {e}")
+                if attempt < 4:
+                    time.sleep(1.0)
+        else:
+            raise RuntimeError(f"Failed to get state from server after 5 attempts")
         self.currpos = np.array(ps["pose"])
         self.currvel = np.array(ps["vel"])
         self.currforce = np.array(ps["force"])

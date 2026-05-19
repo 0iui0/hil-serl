@@ -282,7 +282,9 @@ class CR5AFServer:
                 self.pos = np.concatenate([xyz, quat])
 
                 spd = rt["tcp_speed"]
-                self.vel = np.array(spd[:3]) * MM_TO_M
+                linear_vel = np.array(spd[:3]) * MM_TO_M        # mm/s → m/s
+                angular_vel = np.array(spd[3:6]) * DEG2RAD      # deg/s → rad/s
+                self.vel = np.concatenate([linear_vel, angular_vel])
 
                 ft = rt["tcp_force"]
                 self.force = np.array(ft[:3])

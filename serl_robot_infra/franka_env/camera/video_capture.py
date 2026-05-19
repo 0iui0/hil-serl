@@ -17,9 +17,13 @@ class VideoCapture:
 
     def _reader(self):
         while self.enable:
-            ret, frame = self.cap.read()
+            try:
+                ret, frame = self.cap.read()
+            except Exception:
+                continue
             if not ret:
-                break
+                time.sleep(0.1)
+                continue
             if not self.q.empty():
                 try:
                     self.q.get_nowait()  # discard previous (unprocessed) frame
