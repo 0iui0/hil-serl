@@ -14,10 +14,10 @@ import time
 
 import gymnasium as gym
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 import requests
 
 from cr5af_env.envs.cr5af_env import CR5AFEnv, DefaultCR5AFEnvConfig
-from franka_env.utils.rotations import euler_2_quat
 
 
 class MotorShaftEnv(CR5AFEnv):
@@ -92,18 +92,15 @@ class MotorShaftEnv(CR5AFEnv):
         self.go_to_reset(joint_reset=False)
 
     def go_to_reset(self, joint_reset=False):
-        """Move to reset pose above hole."""
-        self._update_currpos()
-        self._send_pos_command(self.currpos)
-        time.sleep(0.3)
+        """Move to reset pose above hole via MovL (smooth, robot-planned)."""
         self._post("update_param", json=self.config.PRECISION_PARAM)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
-        # Pull up to clear workpiece
+        # Pull up to clear workpiece via MovL (blocking)
         self._update_currpos()
         pull_up = self.currpos.copy()
         pull_up[2] = self.resetpos[2] + 0.04
-        self.interpolate_move(pull_up, timeout=1)
+        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 20}, timeout=30)
 
         if joint_reset:
             print("JOINT RESET")
@@ -120,11 +117,12 @@ class MotorShaftEnv(CR5AFEnv):
             euler_random[-1] += np.random.uniform(
                 -self.random_rz_range, self.random_rz_range
             )
-            reset_pose[3:] = euler_2_quat(euler_random)
-            self._send_pos_command(reset_pose)
+            reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
         else:
-            self._send_pos_command(self.resetpos.copy())
-        time.sleep(0.5)
+            reset_pose = self.resetpos.copy()
+
+        # Move to reset pose via MovL (blocking, smooth)
+        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 20}, timeout=30)
 
         self._post("update_param", json=self.config.COMPLIANCE_PARAM)
 
@@ -198,22 +196,58 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
         self.right = False
         self._req_session = requests.Session()
         self._req_session.trust_env = False
+        self._zero_offset: np.ndarray | None = None
+        self._calibrate_zero()
+
+    def _calibrate_zero(self, samples: int = 30):
+        """Sample SpaceMouse at rest to get zero offset."""
+        print("Calibrating SpaceMouse zero offset via /get_spacemouse...")
+        vals = []
+        for _ in range(samples):
+            try:
+                resp = self._req_session.post(
+                    self.server_url + "get_spacemouse", timeout=2.0,
+                ).json()
+                vals.append(np.array(resp["action"], dtype=np.float32))
+            except Exception:
+                pass
+            time.sleep(0.02)
+        if vals:
+            self._zero_offset = np.median(vals, axis=0)
+            print(f"SpaceMouse zero offset: {self._zero_offset}")
+        else:
+            self._zero_offset = np.zeros(6, dtype=np.float32)
+            print("WARNING: SpaceMouse calibration failed, using zeros")
+
+    _step_count: int = 0
 
     def action(self, action: np.ndarray) -> tuple[np.ndarray, bool]:
         try:
             resp = self._req_session.post(
-                self.server_url + "get_spacemouse", timeout=0.1,
+                self.server_url + "get_spacemouse", timeout=1.0,
             ).json()
             expert_a = np.array(resp["action"], dtype=np.float32)
             buttons = resp["buttons"]
-        except Exception:
+        except Exception as e:
+            if np.random.random() < 0.05:
+                print(f"[SpaceMouse] /get_spacemouse failed: {e}")
             return action, False
+
+        if self._zero_offset is not None:
+            expert_a[:6] -= self._zero_offset
 
         self.left, self.right = buttons[0], buttons[1]
         intervened = False
 
-        if np.linalg.norm(expert_a) > 0.001:
-            intervened = True
+        # Deadman switch: hold left button to enable motion (same as teleop)
+        if not self.left:
+            return action, False
+
+        # Per-axis dead zone (match teleop_cr5af.py threshold of 0.15)
+        if np.max(np.abs(expert_a[:6])) < 0.15:
+            return action, False
+
+        intervened = True
 
         if self.gripper_enabled:
             if self.left:
@@ -232,6 +266,12 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
 
     def step(self, action):
         new_action, replaced = self.action(action)
+        ServerSpacemouseIntervention._step_count += 1
+        if replaced:
+            print(f"[SM #{ServerSpacemouseIntervention._step_count}] "
+                  f"INTERVENE action={np.round(new_action[:6], 3).tolist()}")
+        elif ServerSpacemouseIntervention._step_count % 30 == 0:
+            print(f"[SM #{ServerSpacemouseIntervention._step_count}] no intervention")
         obs, rew, done, truncated, info = self.env.step(new_action)
         if replaced:
             info["intervene_action"] = new_action

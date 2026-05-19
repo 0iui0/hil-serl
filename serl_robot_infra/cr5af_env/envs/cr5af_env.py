@@ -109,7 +109,7 @@ class CR5AFEnv(gym.Env):
         self.gripper_sleep = config.GRIPPER_SLEEP
 
         self.resetpos = np.concatenate(
-            [config.RESET_POSE[:3], euler_2_quat(config.RESET_POSE[3:])]
+            [config.RESET_POSE[:3], R.from_euler("XYZ", config.RESET_POSE[3:], degrees=True).as_quat()]
         )
         if not fake_env:
             self._update_currpos()
@@ -202,18 +202,32 @@ class CR5AFEnv(gym.Env):
     def step(self, action: np.ndarray) -> tuple:
         start_time = time.time()
         action = np.clip(action, self.action_space.low, self.action_space.high)
-        xyz_delta = action[:3]
-
-        self.nextpos = self.currpos.copy()
-        self.nextpos[:3] = self.nextpos[:3] + xyz_delta * self.action_scale[0]
-        self.nextpos[3:] = (
-            R.from_rotvec(action[3:6] * self.action_scale[1])
-            * R.from_quat(self.currpos[3:])
-        ).as_quat()
 
         gripper_action = action[6] * self.action_scale[2]
         self._send_gripper_command(gripper_action)
-        self._send_pos_command(self.clip_safety_box(self.nextpos))
+
+        # Skip ServoP when action is effectively zero (no human input)
+        if np.max(np.abs(action[:6])) > 1e-6:
+            # Sign convention matches teleop_cr5af.py: -dx, +dy, -dz
+            dx, dy, dz, droll, dpitch, dyaw = action[:6]
+            xyz_delta_m = np.array([
+                -dx * self.action_scale[0],
+                 dy * self.action_scale[0],
+                -dz * self.action_scale[0],
+            ])
+            rot_delta = np.array([droll, dpitch, dyaw]) * self.action_scale[1]
+            self.nextpos = self.currpos.copy()
+            self.nextpos[:3] = self.nextpos[:3] + xyz_delta_m
+            self.nextpos[3:] = (
+                R.from_rotvec(rot_delta)
+                * R.from_quat(self.currpos[3:])
+            ).as_quat()
+            self._send_pos_command(self.clip_safety_box(self.nextpos))
+            # DEBUG: trace action → ServoP delta
+            print(f"[STEP] act={np.round(action[:6], 3).tolist()} "
+                  f"dmm={np.round(xyz_delta_m * 1000, 1).tolist()} "
+                  f"curr={np.round(self.currpos[:3] * 1000, 1).tolist()} "
+                  f"next={np.round(self.nextpos[:3] * 1000, 1).tolist()}")
 
         self.curr_path_length += 1
         dt = time.time() - start_time
@@ -262,7 +276,7 @@ class CR5AFEnv(gym.Env):
 
     def interpolate_move(self, goal: np.ndarray, timeout: float):
         if goal.shape == (6,):
-            goal = np.concatenate([goal[:3], euler_2_quat(goal[3:])])
+            goal = np.concatenate([goal[:3], R.from_euler("XYZ", goal[3:], degrees=True).as_quat()])
         steps = int(timeout * self.hz)
         self._update_currpos()
         path = np.linspace(self.currpos, goal, steps)
@@ -273,18 +287,15 @@ class CR5AFEnv(gym.Env):
         self._update_currpos()
 
     def go_to_reset(self, joint_reset=False):
-        """Pull up first, then move to reset pose."""
-        self._update_currpos()
-        self._send_pos_command(self.currpos)
-        time.sleep(0.3)
+        """Pull up first, then move to reset pose via MovL (smooth, robot-planned)."""
         self._post("update_param", json=self.config.PRECISION_PARAM)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
-        # Pull up above workpiece
+        # Pull up above workpiece via MovL (blocking, smooth)
         self._update_currpos()
         pull_up = self.currpos.copy()
         pull_up[2] = self.resetpos[2] + 0.04
-        self.interpolate_move(pull_up, timeout=1)
+        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 20}, timeout=30)
 
         if joint_reset:
             print("JOINT RESET")
@@ -300,11 +311,12 @@ class CR5AFEnv(gym.Env):
             euler_random[-1] += np.random.uniform(
                 -self.random_rz_range, self.random_rz_range
             )
-            reset_pose[3:] = euler_2_quat(euler_random)
-            self._send_pos_command(reset_pose)
+            reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
         else:
-            self._send_pos_command(self.resetpos.copy())
-        time.sleep(0.5)
+            reset_pose = self.resetpos.copy()
+
+        # Move to reset pose via MovL (blocking, smooth)
+        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 20}, timeout=30)
 
         self._post("update_param", json=self.config.COMPLIANCE_PARAM)
 

@@ -38,7 +38,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
 
     # Calibrated 2025-05-18 with CR5AF
     # Units: XYZ in meters, rotation in degrees
-    RESET_POSE = np.array([0.5000, -0.1500, 0.4000, 180.00, -0.00, 0.00])
+    RESET_POSE = np.array([0.4500, -0.150, 0.300, 178, 0, 0])
     GRASP_POSE = np.array([0.7000, -0.1750, 0.2000, -180.00, -0.00, 0.00])
     TARGET_POSE = np.array([0.7100, -0.1750, 0.1260, -180.00, -0.00, 0.00])
     REWARD_THRESHOLD = np.array([0.005, 0.005, 0.005, 2.0, 2.0, 2.0])
@@ -46,11 +46,11 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     ABS_POSE_LIMIT_LOW = np.array([0.400, -0.300, 0.100, -180, -90, -180])
     ABS_POSE_LIMIT_HIGH = np.array([0.800, 0.000, 0.500, 180, 90, 180])
 
-    RANDOM_RESET = True
+    RANDOM_RESET = False
     RANDOM_XY_RANGE = 0.02
     RANDOM_RZ_RANGE = 0.05
     DISPLAY_IMAGE = True
-    MAX_EPISODE_LENGTH = 120            # Longer than RAM (100) due to grasp + insert
+    MAX_EPISODE_LENGTH = 200            # 20s at 10Hz (longer for manual teleop data collection)
 
     # Gripper mode switch
     USE_GRIPPER = False                 # False = fixed-flange (current), True = learned-gripper (future)

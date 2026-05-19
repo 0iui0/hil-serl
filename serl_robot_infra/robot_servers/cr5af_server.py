@@ -318,6 +318,14 @@ class CR5AFServer:
         """Send command via persistent socket. Thread-safe via _cmd_lock."""
         with self._cmd_lock:
             try:
+                # Drain stale responses before sending (like servop does)
+                self._cmd_sock.setblocking(False)
+                try:
+                    while True:
+                        self._cmd_sock.recv(4096)
+                except BlockingIOError:
+                    pass
+                self._cmd_sock.setblocking(True)
                 self._cmd_sock.sendall(cmd.encode("utf-8"))
                 if read_response:
                     self._cmd_sock.settimeout(timeout)
@@ -336,12 +344,10 @@ class CR5AFServer:
 
     def servop(self, x_mm: float, y_mm: float, z_mm: float,
                rx_deg: float, ry_deg: float, rz_deg: float):
-        """Send ServoP (interruptible Cartesian servo, fire-and-forget).
-
-        Each new ServoP immediately interrupts the previous one — no queuing,
-        no lag. Ideal for teleop and RL continuous control.
-        """
+        """Send ServoP (interruptible Cartesian servo, fire-and-forget)."""
         cmd = f"ServoP({x_mm:.3f},{y_mm:.3f},{z_mm:.3f},{rx_deg:.3f},{ry_deg:.3f},{rz_deg:.3f})"
+        print(f"[ServoP] x={x_mm:.1f} y={y_mm:.1f} z={z_mm:.1f} "
+              f"rx={rx_deg:.2f} ry={ry_deg:.2f} rz={rz_deg:.2f}")
         with self._cmd_lock:
             try:
                 # Drain stale response to keep buffer clear
@@ -426,20 +432,25 @@ class CR5AFServer:
         if resp and resp[0] != '0':
             print(f"MovJ error: {resp}")
 
-    def move_to_pose(self, pose: np.ndarray):
-        """Move to Cartesian pose [x,y,z, qx,qy,qz,qw] via MovL (point-to-point)."""
+    def move_to_pose(self, pose: np.ndarray, v: int = -1):
+        """Move to Cartesian pose [x,y,z, qx,qy,qz,qw] via MovL (blocking)."""
         xyz_m = pose[:3]
         quat = pose[3:7]
         rot = R.from_quat(quat)
         rxyz_deg = rot.as_euler("XYZ", degrees=True)
+        print(f"[MovL] x={xyz_m[0]*M_TO_MM:.1f} y={xyz_m[1]*M_TO_MM:.1f} z={xyz_m[2]*M_TO_MM:.1f} "
+              f"rx={rxyz_deg[0]:.2f} ry={rxyz_deg[1]:.2f} rz={rxyz_deg[2]:.2f} v={v}")
         cmd = (
             "MovL(pose={"
             f"{xyz_m[0]*M_TO_MM:.3f},{xyz_m[1]*M_TO_MM:.3f},"
             f"{xyz_m[2]*M_TO_MM:.3f},{rxyz_deg[0]:.3f},"
             f"{rxyz_deg[1]:.3f},{rxyz_deg[2]:.3f}"
-            "})"
+            "}"
         )
-        resp = self._send_cmd(cmd)
+        if v > 0:
+            cmd += f",v={v}"
+        cmd += ")"
+        resp = self._send_cmd(cmd, timeout=30.0)
         if resp and resp[0] != '0':
             print(f"MovL error: {resp}")
 
@@ -449,6 +460,8 @@ class CR5AFServer:
         quat = pose[3:7]
         rot = R.from_quat(quat)
         rxyz_deg = rot.as_euler("XYZ", degrees=True)
+        print(f"[MovL_nowait] x={xyz_m[0]*M_TO_MM:.1f} y={xyz_m[1]*M_TO_MM:.1f} z={xyz_m[2]*M_TO_MM:.1f} "
+              f"rx={rxyz_deg[0]:.2f} ry={rxyz_deg[1]:.2f} rz={rxyz_deg[2]:.2f}")
         cmd = (
             "MovL(pose={"
             f"{xyz_m[0]*M_TO_MM:.3f},{xyz_m[1]*M_TO_MM:.3f},"
@@ -748,6 +761,17 @@ def main(argv):
             return err
         pos = np.array(request.json["arr"])
         server.move_to_pose_no_wait(pos)
+        return "Moved"
+
+    @webapp.route("/movl_wait", methods=["POST"])
+    def movl_wait():
+        """Blocking MovL — waits for robot to finish motion before responding."""
+        err = _require_not_safe()
+        if err:
+            return err
+        pos = np.array(request.json["arr"])
+        speed = request.json.get("v", -1)
+        server.move_to_pose(pos, v=speed)
         return "Moved"
 
     @webapp.route("/startimp", methods=["POST"])
