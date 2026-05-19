@@ -4,12 +4,17 @@ CR5AF Robot Control Server (Flask)
 Wraps the CR5AF TCP protocol into a Flask HTTP API
 compatible with the HIL-SERL franka_env gym interface.
 
+Uses persistent command socket + ServoP for responsive teleop.
+CR5AF allows only ONE TCP connection to port 29999 at a time, so all
+commands (Dashboard + ServoP) share a single persistent socket.
+
 The CR5AF communicates via TCP:
-  - Dashboard port 29999: text commands (MovL, EnableRobot, etc.)
+  - Dashboard port 29999: text commands (MovL, ServoP, EnableRobot, etc.)
   - Real-time port 30004: binary state feedback (1440 bytes)
 
 Routes match franka_server.py so the gym env can connect without modification.
 """
+import glob
 import os
 import sys
 import time
@@ -22,7 +27,7 @@ from scipy.spatial.transform import Rotation as R
 from absl import app, flags
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("robot_ip", "192.168.1.6", "Robot controller IP")
+flags.DEFINE_string("robot_ip", "192.168.5.1", "Robot controller IP")
 flags.DEFINE_integer("dashboard_port", 29999, "Dashboard TCP port")
 flags.DEFINE_integer("rt_port", 30004, "Real-time data TCP port")
 flags.DEFINE_string("flask_url", "0.0.0.0", "Flask bind address")
@@ -35,6 +40,14 @@ flags.DEFINE_list(
     [0, 0, 0, -90, 0, 45],
     "Home joint angles in degrees for jointreset",
 )
+flags.DEFINE_string("spacemouse_device", "", "SpaceMouse evdev device path (auto-detect if empty)")
+flags.DEFINE_boolean("no_spacemouse", False, "Disable SpaceMouse teleop server")
+flags.DEFINE_boolean("teleop", False, "Enable background SpaceMouse teleop (for standalone testing)")
+flags.DEFINE_float("teleop_action_scale", 8.0, "Teleop: mm per unit of SpaceMouse input")
+flags.DEFINE_float("teleop_rot_scale", 3.0, "Teleop: deg per unit of SpaceMouse rotation")
+flags.DEFINE_float("teleop_hz", 33.0, "Teleop: ServoP send rate (Hz)")
+flags.DEFINE_float("teleop_dead_zone", 0.15, "Teleop: per-axis dead zone")
+flags.DEFINE_float("teleop_delta_threshold", 0.3, "Teleop: min delta (mm or deg) to send ServoP")
 
 MM_TO_M = 0.001
 M_TO_MM = 1000.0
@@ -42,19 +55,75 @@ DEG2RAD = np.pi / 180.0
 RAD2DEG = 180.0 / np.pi
 NUM_JOINTS = 6
 
+
+class EvdevSpaceMouse:
+    """Reads SpaceMouse via evdev for Jetson/ARM where hidraw is blocked.
+
+    Background thread caches latest axes/buttons state.
+    Returns the same action format as SpaceMouseExpert:
+      action = [-ev_Y, ev_X, ev_Z, -ev_RX, -ev_RY, -ev_RZ]
+      buttons = [BTN_0, BTN_1]
+    """
+
+    def __init__(self, device_path: str = ""):
+        import evdev
+
+        if not device_path:
+            for ev in sorted(glob.glob("/dev/input/event*")):
+                try:
+                    name = open(
+                        f"/sys/class/input/{ev.split('/')[-1]}/device/name"
+                    ).read().strip()
+                    if "SpaceMouse" in name or "Space Navigator" in name:
+                        device_path = ev
+                        break
+                except Exception:
+                    pass
+
+        self._device = None
+        self._axes = [0.0] * 6
+        self._buttons = [0, 0]
+        self._running = True
+
+        if not device_path:
+            print("WARNING: No SpaceMouse found. /get_spacemouse returns zeros.")
+            return
+
+        self._device = evdev.InputDevice(device_path)
+        self._thread = threading.Thread(target=self._ev_loop, daemon=True)
+        self._thread.start()
+        print(f"SpaceMouse connected: {device_path}")
+
+    def _ev_loop(self):
+        import evdev
+        try:
+            for event in self._device.read_loop():
+                if not self._running:
+                    break
+                if event.type == evdev.ecodes.EV_ABS and event.code <= 5:
+                    self._axes[event.code] = event.value / 350.0
+                elif event.type == evdev.ecodes.EV_KEY:
+                    if event.code == 256:
+                        self._buttons[0] = event.value
+                    elif event.code == 257:
+                        self._buttons[1] = event.value
+        except Exception:
+            pass
+
+    def get_state(self) -> tuple[list[float], list[int]]:
+        a = self._axes
+        action = [-a[1], a[0], a[2], -a[3], -a[4], -a[5]]
+        return action, self._buttons.copy()
+
+    def close(self):
+        self._running = False
+        if self._device:
+            try:
+                self._device.close()
+            except Exception:
+                pass
+
 # Real-time data struct offsets (packed, no padding)
-# Refer to dobot_api.py MyType for full struct layout.
-# uint16_t len at 0
-# uint64_t robot_mode at 24
-# uint64_t test_value at 48 — magic 0x123456789abcdef for frame validation
-# double q_actual[6] at 432
-# double qd_actual[6] at 480
-# double tool_vector_actual[6] at 624 — [x,y,z,rx,ry,rz] (mm, deg)
-# double TCP_speed_actual[6] at 672
-# double TCP_force[6] at 720 — current-based estimation
-# double SixForceValue[6] at 1304 — 6-axis force sensor
-# double ActualQuaternion[4] at 1384 — [w,x,y,z]
-# uint64_t current_command_id at 1112
 RT_HEADER = 0
 RT_ROBOT_MODE = 24
 RT_TEST_VALUE = 48
@@ -80,45 +149,11 @@ def _recv_exact(sock: socket.socket, n: int, timeout: float = 3.0) -> bytes:
     return bytes(buf)
 
 
-def _dashboard_cmd(ip: str, port: int, cmd: str, timeout: float = 5.0) -> str:
-    """Send a text command to the dashboard port and return the response."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    try:
-        sock.connect((ip, port))
-        sock.sendall(cmd.encode("utf-8"))
-        resp = bytearray()
-        while True:
-            c = sock.recv(1)
-            if not c or c == b";":
-                break
-            resp.extend(c)
-        return resp.decode("utf-8").strip()
-    finally:
-        sock.close()
-
-
-def _dashboard_cmd_no_wait(ip: str, port: int, cmd: str):
-    """Send a text command without waiting for response (fire-and-forget)."""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1.0)
-        sock.connect((ip, port))
-        sock.sendall(cmd.encode("utf-8"))
-    except Exception:
-        pass
-    finally:
-        sock.close()
-
-
 RT_FRAME_MAGIC = 0x123456789abcdef
 
 
 def _parse_rt_data(data: bytes) -> dict | None:
-    """Parse the 1440-byte real-time data struct into a dict.
-
-    Returns None if the frame magic (TestValue) is invalid.
-    """
+    """Parse the 1440-byte real-time data struct into a dict."""
     def _doubles(offset: int, count: int = 6) -> list:
         return list(struct.unpack_from("<" + "d" * count, data, offset))
 
@@ -127,7 +162,6 @@ def _parse_rt_data(data: bytes) -> dict | None:
     if rt_len != 1440:
         raise ValueError(f"Unexpected RT data length: {rt_len}")
 
-    # Validate frame magic
     test_val = struct.unpack_from("<Q", data, RT_TEST_VALUE)[0]
     if test_val != RT_FRAME_MAGIC:
         return None
@@ -136,17 +170,22 @@ def _parse_rt_data(data: bytes) -> dict | None:
         "robot_mode": struct.unpack_from("<Q", data, RT_ROBOT_MODE)[0],
         "q_actual": _doubles(RT_Q_ACTUAL),
         "qd_actual": _doubles(RT_QD_ACTUAL),
-        "tool_vector": _doubles(RT_TOOL_VECTOR),   # [x,y,z,rx,ry,rz] mm,deg
+        "tool_vector": _doubles(RT_TOOL_VECTOR),
         "tcp_speed": _doubles(RT_TCP_SPEED),
         "tcp_force": _doubles(RT_TCP_FORCE),
         "six_force": _doubles(RT_SIX_FORCE),
-        "actual_quat": _doubles(RT_ACTUAL_QUAT, 4),  # [w,x,y,z]
+        "actual_quat": _doubles(RT_ACTUAL_QUAT, 4),
         "current_command_id": struct.unpack_from("<Q", data, RT_CURRENT_COMMAND_ID)[0],
     }
 
 
 class CR5AFServer:
-    """CR5AF robot server wrapping the TCP protocol for Flask API."""
+    """CR5AF robot server with persistent command socket + ServoP for teleop.
+
+    Uses a single persistent TCP connection to port 29999 for all commands.
+    ServoP provides interruptible, low-latency Cartesian servo for real-time
+    control (teleop, RL step). MovL/MovJ used for point-to-point moves (reset).
+    """
 
     def __init__(self, robot_ip: str, dashboard_port: int, rt_port: int,
                  speed: float, accel: float, safe: bool = False):
@@ -159,16 +198,16 @@ class CR5AFServer:
 
         # State cache (SI units: position in meters, rotation in radians)
         self.lock = threading.Lock()
-        self.pos = np.zeros(7)        # [x,y,z, qx,qy,qz,qw]
-        self.vel = np.zeros(6)        # tcp velocity (m/s, rad/s)
-        self.force = np.zeros(3)      # tcp force (N)
-        self.torque = np.zeros(3)     # tcp torque (Nm)
-        self.q = np.zeros(NUM_JOINTS)     # joint positions (rad)
-        self.dq = np.zeros(NUM_JOINTS)    # joint velocities (rad/s)
+        self.pos = np.zeros(7)
+        self.vel = np.zeros(6)
+        self.force = np.zeros(3)
+        self.torque = np.zeros(3)
+        self.q = np.zeros(NUM_JOINTS)
+        self.dq = np.zeros(NUM_JOINTS)
         self.gripper_pos = 1.0
         self.robot_mode = 0
         self.current_command_id = 0
-        self.six_force = np.zeros(6)       # six-axis force sensor (N, Nm)
+        self.six_force = np.zeros(6)
         self._connected = False
 
         # Connect to real-time data feed
@@ -176,10 +215,17 @@ class CR5AFServer:
         self._running = True
         self._connect_rt()
 
-        if safe:
-            print("SAFE MODE: reading state only, no motion commands")
-        else:
+        # Persistent command socket (CR5AF allows only ONE connection to port 29999)
+        self._cmd_sock = None
+        self._cmd_lock = threading.Lock()
+
+        if not safe:
+            self._connect_cmd()
             self._enable_robot()
+        else:
+            print("SAFE MODE: reading state only, no motion commands")
+
+    # ── RT feedback (port 30004) ────────────────────────────────────────────
 
     def _connect_rt(self):
         """Connect to the real-time data feed in a background thread."""
@@ -222,91 +268,149 @@ class CR5AFServer:
                     continue
 
             if rt is None:
-                # Invalid frame magic, skip
                 continue
 
             with self.lock:
                 self.robot_mode = rt["robot_mode"]
 
-                # tool_vector: [x,y,z,rx,ry,rz] in mm and degrees → m and radians
                 tv = rt["tool_vector"]
                 xyz = np.array(tv[:3]) * MM_TO_M
                 rxyz = np.array(tv[3:6]) * DEG2RAD
                 rot = R.from_euler("XYZ", rxyz)
-                quat = rot.as_quat()  # [qx, qy, qz, qw]
+                quat = rot.as_quat()
 
                 self.pos = np.concatenate([xyz, quat])
 
-                # TCP speed
                 spd = rt["tcp_speed"]
-                self.vel = np.array(spd[:3]) * MM_TO_M  # convert mm/s to m/s
-                # angular speed is already rad/s (tcp_speed[3:6])
+                self.vel = np.array(spd[:3]) * MM_TO_M
 
-                # Force/torque from current-based estimation
                 ft = rt["tcp_force"]
                 self.force = np.array(ft[:3])
                 self.torque = np.array(ft[3:6])
 
-                # Joint positions and velocities
                 self.q = np.array(rt["q_actual"]) * DEG2RAD
                 self.dq = np.array(rt["qd_actual"]) * DEG2RAD
 
-                # Current command ID for movement tracking
                 self.current_command_id = rt["current_command_id"]
 
-                # Six-axis force sensor data (from SixForceValue)
                 self.six_force = np.array(rt["six_force"])
 
-    def _enable_robot(self):
-        """Enable robot and set speed/acceleration."""
+    # ── Persistent command socket (port 29999) ──────────────────────────────
+
+    def _connect_cmd(self):
+        """Connect persistent command socket for all dashboard + ServoP commands."""
+        self._cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._cmd_sock.settimeout(5.0)
+        self._cmd_sock.connect((self.robot_ip, self.dashboard_port))
+        self._cmd_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # Drain stale data from welcome message
+        self._cmd_sock.setblocking(False)
         try:
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                                  "EnableRobot()")
+            self._cmd_sock.recv(4096)
+        except BlockingIOError:
+            pass
+        self._cmd_sock.setblocking(True)
+        print(f"Connected command socket to {self.robot_ip}:{self.dashboard_port}")
+
+    def _send_cmd(self, cmd: str, read_response: bool = True, timeout: float = 5.0) -> str:
+        """Send command via persistent socket. Thread-safe via _cmd_lock."""
+        with self._cmd_lock:
+            try:
+                self._cmd_sock.sendall(cmd.encode("utf-8"))
+                if read_response:
+                    self._cmd_sock.settimeout(timeout)
+                    resp = bytearray()
+                    while True:
+                        c = self._cmd_sock.recv(1)
+                        if not c or c == b";":
+                            break
+                        resp.extend(c)
+                    return resp.decode("utf-8").strip()
+                return ""
+            except Exception as e:
+                print(f"[CMD ERROR] {e}")
+                self._reconnect_cmd()
+                return f"ERROR: {e}"
+
+    def servop(self, x_mm: float, y_mm: float, z_mm: float,
+               rx_deg: float, ry_deg: float, rz_deg: float):
+        """Send ServoP (interruptible Cartesian servo, fire-and-forget).
+
+        Each new ServoP immediately interrupts the previous one — no queuing,
+        no lag. Ideal for teleop and RL continuous control.
+        """
+        cmd = f"ServoP({x_mm:.3f},{y_mm:.3f},{z_mm:.3f},{rx_deg:.3f},{ry_deg:.3f},{rz_deg:.3f})"
+        with self._cmd_lock:
+            try:
+                # Drain stale response to keep buffer clear
+                self._cmd_sock.setblocking(False)
+                try:
+                    while True:
+                        self._cmd_sock.recv(4096)
+                except BlockingIOError:
+                    pass
+                # Fire-and-forget for low latency
+                self._cmd_sock.setblocking(True)
+                self._cmd_sock.sendall(cmd.encode("utf-8"))
+            except Exception as e:
+                print(f"[ServoP ERROR] {e}")
+                self._reconnect_cmd()
+
+    def servop_pose(self, pose: np.ndarray):
+        """Send ServoP for Cartesian pose [x,y,z, qx,qy,qz,qw]."""
+        xyz_m = pose[:3]
+        quat = pose[3:7]
+        rot = R.from_quat(quat)
+        rxyz_deg = rot.as_euler("XYZ", degrees=True)
+        self.servop(
+            xyz_m[0] * M_TO_MM, xyz_m[1] * M_TO_MM, xyz_m[2] * M_TO_MM,
+            rxyz_deg[0], rxyz_deg[1], rxyz_deg[2],
+        )
+
+    def _reconnect_cmd(self):
+        """Reconnect the command socket."""
+        try:
+            self._cmd_sock.close()
+        except Exception:
+            pass
+        try:
+            self._connect_cmd()
+        except Exception as e:
+            print(f"[CMD RECONNECT FAILED] {e}")
+
+    # ── Robot control ───────────────────────────────────────────────────────
+
+    def _enable_robot(self):
+        """Enable robot and set speed/acceleration via persistent socket."""
+        try:
+            resp = self._send_cmd("EnableRobot()")
             print(f"EnableRobot: {resp}")
             time.sleep(0.5)
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                                  f"SpeedFactor({int(self.speed_pct)})")
+            resp = self._send_cmd(f"SpeedFactor({int(self.speed_pct)})")
             print(f"SpeedFactor: {resp}")
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                                  f"AccL({int(self.accel_pct)})")
+            resp = self._send_cmd(f"AccL({int(self.accel_pct)})")
             print(f"AccL: {resp}")
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                                  f"VelL({int(self.speed_pct)})")
+            resp = self._send_cmd(f"VelL({int(self.speed_pct)})")
             print(f"VelL: {resp}")
         except Exception as e:
             print(f"Warning: EnableRobot failed: {e}")
 
     def disable_robot(self):
-        """Disable robot."""
-        try:
-            _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                           "DisableRobot()")
-        except Exception:
-            pass
+        self._send_cmd("DisableRobot()")
 
     def clear_error(self):
-        """Clear robot errors and re-enable."""
         try:
-            _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                           "ClearError()")
+            self._send_cmd("ClearError()")
             time.sleep(1.0)
-            _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                           "EnableRobot()")
+            self._send_cmd("EnableRobot()")
             time.sleep(0.5)
-            _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                           f"SpeedFactor({int(self.speed_pct)})")
-            _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                           f"AccL({int(self.accel_pct)})")
+            self._send_cmd(f"SpeedFactor({int(self.speed_pct)})")
+            self._send_cmd(f"AccL({int(self.accel_pct)})")
         except Exception as e:
             print(f"ClearError failed: {e}")
 
     def get_error(self, language: str = "en") -> str:
-        """Get robot error/alarm information."""
-        try:
-            return _dashboard_cmd(self.robot_ip, self.dashboard_port,
-                                  f"GetError({language})")
-        except Exception as e:
-            return f"GetError failed: {e}"
+        return self._send_cmd(f"GetError({language})")
 
     def move_to_joint(self, joint_deg: np.ndarray):
         """Move to joint position [j1..j6] in degrees via MovJ."""
@@ -316,41 +420,12 @@ class CR5AFServer:
             f"{joint_deg[3]:.3f},{joint_deg[4]:.3f},{joint_deg[5]:.3f}"
             "})"
         )
-        try:
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
-            if resp and resp[0] != '0':
-                print(f"MovJ error: {resp}")
-        except Exception as e:
-            print(f"MovJ failed: {e}")
+        resp = self._send_cmd(cmd)
+        if resp and resp[0] != '0':
+            print(f"MovJ error: {resp}")
 
     def move_to_pose(self, pose: np.ndarray):
-        """Move to Cartesian pose [x,y,z, qx,qy,qz,qw] via MovL."""
-        xyz_m = pose[:3]
-        quat = pose[3:7]
-        rot = R.from_quat(quat)
-        rxyz_deg = rot.as_euler("XYZ", degrees=True)
-
-        # Convert m to mm for robot
-        x_mm = xyz_m[0] * M_TO_MM
-        y_mm = xyz_m[1] * M_TO_MM
-        z_mm = xyz_m[2] * M_TO_MM
-
-        cmd = (
-            "MovL(pose={"
-            f"{x_mm:.3f},{y_mm:.3f},{z_mm:.3f},"
-            f"{rxyz_deg[0]:.3f},{rxyz_deg[1]:.3f},{rxyz_deg[2]:.3f}"
-            "})"
-        )
-
-        try:
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
-            if resp and resp[0] != '0':
-                print(f"MovL error: {resp}")
-        except Exception as e:
-            print(f"MovL failed: {e}")
-
-    def move_to_pose_no_wait(self, pose: np.ndarray):
-        """Send MovL but don't wait for completion."""
+        """Move to Cartesian pose [x,y,z, qx,qy,qz,qw] via MovL (point-to-point)."""
         xyz_m = pose[:3]
         quat = pose[3:7]
         rot = R.from_quat(quat)
@@ -362,44 +437,140 @@ class CR5AFServer:
             f"{rxyz_deg[1]:.3f},{rxyz_deg[2]:.3f}"
             "})"
         )
-        _dashboard_cmd_no_wait(self.robot_ip, self.dashboard_port, cmd)
+        resp = self._send_cmd(cmd)
+        if resp and resp[0] != '0':
+            print(f"MovL error: {resp}")
+
+    def move_to_pose_no_wait(self, pose: np.ndarray):
+        """Send MovL fire-and-forget (for non-critical queued moves)."""
+        xyz_m = pose[:3]
+        quat = pose[3:7]
+        rot = R.from_quat(quat)
+        rxyz_deg = rot.as_euler("XYZ", degrees=True)
+        cmd = (
+            "MovL(pose={"
+            f"{xyz_m[0]*M_TO_MM:.3f},{xyz_m[1]*M_TO_MM:.3f},"
+            f"{xyz_m[2]*M_TO_MM:.3f},{rxyz_deg[0]:.3f},"
+            f"{rxyz_deg[1]:.3f},{rxyz_deg[2]:.3f}"
+            "})"
+        )
+        self._send_cmd(cmd, read_response=False)
 
     def update_state(self):
-        """Read current robot state from the cache (updated by RT thread)."""
         with self.lock:
-            pass  # state is already up-to-date from RT loop
+            pass
 
     def reset_joint(self):
-        """Reset to home joint position via MovJ."""
         joints = FLAGS.reset_joint_target
         cmd = (
             "MovJ(joint={"
             + ",".join(str(float(j)) for j in joints)
             + "})"
         )
-        try:
-            _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
-        except Exception as e:
-            print(f"Joint reset failed: {e}")
+        self._send_cmd(cmd)
 
     def close(self):
-        """Clean up connections."""
         self._running = False
-        if self._rt_sock:
+        for sock in (self._rt_sock, self._cmd_sock):
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    # ── Teleop (SpaceMouse → ServoP background thread) ──────────────────
+
+    def start_teleop(self, spacemouse: "EvdevSpaceMouse",
+                     action_scale: float = 8.0, rot_scale: float = 3.0,
+                     hz: float = 33.0, dead_zone: float = 0.15,
+                     delta_threshold: float = 0.3):
+        """Start background SpaceMouse → ServoP teleop thread."""
+        self._teleop_sm = spacemouse
+        self._teleop_hz = hz
+        self._teleop_action_scale = action_scale
+        self._teleop_rot_scale = rot_scale
+        self._teleop_dead_zone = dead_zone
+        self._teleop_delta_threshold = delta_threshold
+        self._teleop_running = True
+
+        # Calibrate zero offset
+        dt = 1.0 / hz
+        print("Calibrating SpaceMouse zero offset (keep untouched)...")
+        samples = []
+        for _ in range(int(1.0 / dt)):
+            a, _ = spacemouse.get_state()
+            samples.append(np.array(a[:6], dtype=np.float32))
+            time.sleep(dt)
+        self._teleop_zero = np.median(samples, axis=0)
+        print(f"Zero offset: {self._teleop_zero}")
+
+        t = threading.Thread(target=self._teleop_loop, daemon=True)
+        t.start()
+        print(f"Teleop thread started ({hz}Hz)")
+
+    def _teleop_loop(self):
+        """Background loop: SpaceMouse → delta → ServoP."""
+        dt = 1.0 / self._teleop_hz
+        while self._teleop_running and self._running:
+            loop_start = time.monotonic()
             try:
-                self._rt_sock.close()
-            except Exception:
-                pass
+                action, buttons = self._teleop_sm.get_state()
+                action = np.array(action, dtype=np.float32)
+                action[:6] -= self._teleop_zero
+
+                # Deadman: hold left button to enable motion
+                if not buttons[0]:
+                    time.sleep(dt)
+                    continue
+
+                # Dead zone
+                if np.max(np.abs(action[:6])) < self._teleop_dead_zone:
+                    time.sleep(dt)
+                    continue
+
+                dx, dy, dz, droll, dpitch, dyaw = action[:6]
+                delta = np.array([
+                    -dx * self._teleop_action_scale,
+                    dy * self._teleop_action_scale,
+                    -dz * self._teleop_action_scale,
+                    droll * self._teleop_rot_scale,
+                    dpitch * self._teleop_rot_scale,
+                    dyaw * self._teleop_rot_scale,
+                ])
+
+                if np.max(np.abs(delta)) < self._teleop_delta_threshold:
+                    time.sleep(dt)
+                    continue
+
+                # Current pose from RT cache (mm, deg)
+                with self.lock:
+                    if self.pos is None:
+                        time.sleep(dt)
+                        continue
+                    cur_xyz_mm = self.pos[:3] * M_TO_MM
+                    cur_euler_deg = R.from_quat(self.pos[3:]).as_euler("XYZ", degrees=True)
+
+                target = [
+                    cur_xyz_mm[0] + delta[0],
+                    cur_xyz_mm[1] + delta[1],
+                    cur_xyz_mm[2] + delta[2],
+                    cur_euler_deg[0] + delta[3],
+                    cur_euler_deg[1] + delta[4],
+                    cur_euler_deg[2] + delta[5],
+                ]
+
+                self.servop(*target)
+            except Exception as e:
+                print(f"[TELEOP ERROR] {e}")
+
+            elapsed = time.monotonic() - loop_start
+            if elapsed < dt:
+                time.sleep(dt - elapsed)
 
     # ── Force Control (FC) mode ──────────────────────────────────────────
 
     def fc_force_mode(self, directions: list[int], target_forces: list[int],
                       reference: int = -1, user: int = -1, tool: int = -1) -> str:
-        """Start force control with per-direction enable flags and target forces.
-
-        directions:   6 ints [0|1] per axis (x,y,z,rx,ry,rz) — 1=enabled
-        target_forces: 6 ints — target force per axis (N for xyz, N/m for rz)
-        """
         dir_str = "{" + ",".join(str(d) for d in directions) + "}"
         f_str = "{" + ",".join(str(f) for f in target_forces) + "}"
         cmd = f"FCForceMode({dir_str},{f_str}"
@@ -410,80 +581,45 @@ class CR5AFServer:
         if tool != -1:
             cmd += f",tool={tool}"
         cmd += ")"
-        try:
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
-            print(f"FCForceMode: {resp}")
-            return resp
-        except Exception as e:
-            msg = f"FCForceMode failed: {e}"
-            print(msg)
-            return msg
+        resp = self._send_cmd(cmd)
+        print(f"FCForceMode: {resp}")
+        return resp
 
     def fc_set_stiffness(self, vals: list[float]) -> str:
-        """Set stiffness (elastic coefficient) per axis [kx,ky,kz,krx,kry,krz]."""
         cmd = "FCSetStiffness(" + ",".join(f"{v}" for v in vals) + ")"
-        return self._fc_cmd("FCSetStiffness", cmd)
+        return self._send_cmd(cmd)
 
     def fc_set_damping(self, vals: list[float]) -> str:
-        """Set damping coefficient per axis [dx,dy,dz,drx,dry,drz]."""
         cmd = "FCSetDamping(" + ",".join(f"{v}" for v in vals) + ")"
-        return self._fc_cmd("FCSetDamping", cmd)
+        return self._send_cmd(cmd)
 
     def fc_set_mass(self, vals: list[float]) -> str:
-        """Set mass/inertia coefficient per axis [mx,my,mz,mrx,mry,mrz]."""
         cmd = "FCSetMass(" + ",".join(f"{v}" for v in vals) + ")"
-        return self._fc_cmd("FCSetMass", cmd)
+        return self._send_cmd(cmd)
 
     def fc_set_force_limit(self, vals: list[float]) -> str:
-        """Set max force limit per axis [x,y,z,rx,ry,rz]."""
         cmd = "FCSetForceLimit(" + ",".join(f"{v}" for v in vals) + ")"
-        return self._fc_cmd("FCSetForceLimit", cmd)
+        return self._send_cmd(cmd)
 
     def fc_set_force_speed_limit(self, vals: list[int]) -> str:
-        """Set force control adjustment speed per axis [x,y,z,rx,ry,rz]."""
         cmd = "FCSetForceSpeedLimit(" + ",".join(str(v) for v in vals) + ")"
-        return self._fc_cmd("FCSetForceSpeedLimit", cmd)
+        return self._send_cmd(cmd)
 
     def fc_set_force(self, vals: list[float]) -> str:
-        """Adjust target force in real-time [fx,fy,fz,frx,fry,frz]."""
         cmd = "FCSetForce(" + ",".join(f"{v}" for v in vals) + ")"
-        return self._fc_cmd("FCSetForce", cmd)
+        return self._send_cmd(cmd)
 
     def fc_off(self) -> str:
-        """Exit force control mode."""
-        try:
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, "FCOff()")
-            print(f"FCOff: {resp}")
-            return resp
-        except Exception as e:
-            msg = f"FCOff failed: {e}"
-            print(msg)
-            return msg
+        resp = self._send_cmd("FCOff()")
+        print(f"FCOff: {resp}")
+        return resp
 
     def six_force_home(self) -> str:
-        """Tare the six-axis force sensor."""
-        try:
-            return _dashboard_cmd(self.robot_ip, self.dashboard_port, "SixForceHome()")
-        except Exception as e:
-            return f"SixForceHome failed: {e}"
+        return self._send_cmd("SixForceHome()")
 
     def get_force_sensor(self, tool: int = -1) -> str:
-        """Read six-axis force sensor values."""
         cmd = "GetForce()" if tool == -1 else f"GetForce({tool})"
-        try:
-            return _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
-        except Exception as e:
-            return f"GetForce failed: {e}"
-
-    def _fc_cmd(self, name: str, cmd: str) -> str:
-        """Send an FC command and return the response."""
-        try:
-            resp = _dashboard_cmd(self.robot_ip, self.dashboard_port, cmd)
-            return resp
-        except Exception as e:
-            msg = f"{name} failed: {e}"
-            print(msg)
-            return msg
+        return self._send_cmd(cmd)
 
 
 def main(argv):
@@ -497,6 +633,19 @@ def main(argv):
         accel=FLAGS.acceleration,
         safe=FLAGS.safe,
     )
+
+    spacemouse: EvdevSpaceMouse | None = None
+    if not FLAGS.no_spacemouse:
+        spacemouse = EvdevSpaceMouse(device_path=FLAGS.spacemouse_device)
+        if FLAGS.teleop and spacemouse._device is not None and not server.safe:
+            server.start_teleop(
+                spacemouse,
+                action_scale=FLAGS.teleop_action_scale,
+                rot_scale=FLAGS.teleop_rot_scale,
+                hz=FLAGS.teleop_hz,
+                dead_zone=FLAGS.teleop_dead_zone,
+                delta_threshold=FLAGS.teleop_delta_threshold,
+            )
 
     def _require_not_safe():
         if server.safe:
@@ -565,15 +714,33 @@ def main(argv):
 
     @webapp.route("/clearerr", methods=["POST"])
     def clear():
+        """Lightweight error clear (like Franka). Just send ClearError(), return immediately."""
+        if not server.safe:
+            server._send_cmd("ClearError()")
+        return "Clear"
+
+    @webapp.route("/full_recovery", methods=["POST"])
+    def full_recovery():
+        """Full error recovery: ClearError + re-enable robot + set speed/accel."""
         err = _require_not_safe()
         if err:
             return err
         server.clear_error()
-        return "Clear"
+        return "Full Recovery"
 
     @webapp.route("/pose", methods=["POST"])
     def pose():
-        """Move to Cartesian pose. Uses no-wait MovL for continuous control."""
+        """Move to Cartesian pose via ServoP for real-time teleop control."""
+        err = _require_not_safe()
+        if err:
+            return err
+        pos = np.array(request.json["arr"])
+        server.servop_pose(pos)
+        return "Moved"
+
+    @webapp.route("/movl", methods=["POST"])
+    def movl():
+        """Move to Cartesian pose via MovL (queued, for point-to-point moves)."""
         err = _require_not_safe()
         if err:
             return err
@@ -583,25 +750,16 @@ def main(argv):
 
     @webapp.route("/startimp", methods=["POST"])
     def start_impedance():
-        """Start FC-based impedance-like mode.
-
-        Configures FC with zero target forces (pure compliance).
-        Stiffness/damping provide spring-damper behavior similar to
-        Franka's cartesian_impedance_controller.
-        MovL commands sent during FC mode act as equilibrium pose changes.
-        """
         err = _require_not_safe()
         if err:
             return err
         body = request.json or {}
 
-        # Set compliance parameters before entering FC mode
         stiffness = body.get("stiffness", [500, 500, 500, 30, 30, 30])
         damping = body.get("damping", [10, 10, 10, 1, 1, 1])
         server.fc_set_stiffness(stiffness)
         server.fc_set_damping(damping)
 
-        # FC mode: all directions compliant, zero target force
         directions = [1, 1, 1, 1, 1, 1]
         target_forces = [0, 0, 0, 0, 0, 0]
         resp = server.fc_force_mode(directions, target_forces)
@@ -731,6 +889,13 @@ def main(argv):
     @webapp.route("/reset_gripper", methods=["POST"])
     def reset_gripper():
         return "No gripper (no-op)"
+
+    @webapp.route("/get_spacemouse", methods=["POST"])
+    def get_spacemouse():
+        if spacemouse is None:
+            return jsonify({"action": [0.0] * 6, "buttons": [0, 0]})
+        action, buttons = spacemouse.get_state()
+        return jsonify({"action": action, "buttons": buttons})
 
     webapp.run(host=FLAGS.flask_url, port=FLAGS.flask_port,
                threaded=True)

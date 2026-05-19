@@ -180,3 +180,59 @@ class GripperPenaltyWrapper(gym.Wrapper):
 
         self.last_gripper_pos = observation["state"][0, 0]
         return observation, reward, terminated, truncated, info
+
+
+class ServerSpacemouseIntervention(gym.ActionWrapper):
+    """Reads SpaceMouse from cr5af_server via HTTP (/get_spacemouse).
+
+    Drop-in replacement for SpacemouseIntervention that avoids pyspacemouse/HID
+    issues on Jetson/ARM. The SpaceMouse is read by cr5af_server via evdev and
+    exposed as an HTTP endpoint.
+    """
+
+    def __init__(self, env, server_url="http://127.0.0.1:5000/"):
+        super().__init__(env)
+        self.server_url = server_url
+        self.gripper_enabled = self.action_space.shape == (7,)
+        self.left = False
+        self.right = False
+
+    def action(self, action: np.ndarray) -> tuple[np.ndarray, bool]:
+        try:
+            resp = requests.post(
+                self.server_url + "get_spacemouse", timeout=0.1
+            ).json()
+            expert_a = np.array(resp["action"], dtype=np.float32)
+            buttons = resp["buttons"]
+        except Exception:
+            return action, False
+
+        self.left, self.right = buttons[0], buttons[1]
+        intervened = False
+
+        if np.linalg.norm(expert_a) > 0.001:
+            intervened = True
+
+        if self.gripper_enabled:
+            if self.left:
+                gripper_action = np.random.uniform(-1, -0.9, size=(1,))
+                intervened = True
+            elif self.right:
+                gripper_action = np.random.uniform(0.9, 1, size=(1,))
+                intervened = True
+            else:
+                gripper_action = np.zeros((1,))
+            expert_a = np.concatenate((expert_a, gripper_action))
+
+        if intervened:
+            return expert_a, True
+        return action, False
+
+    def step(self, action):
+        new_action, replaced = self.action(action)
+        obs, rew, done, truncated, info = self.env.step(new_action)
+        if replaced:
+            info["intervene_action"] = new_action
+        info["left"] = self.left
+        info["right"] = self.right
+        return obs, rew, done, truncated, info

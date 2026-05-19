@@ -6,7 +6,6 @@ import numpy as np
 
 from franka_env.envs.wrappers import (
     Quat2EulerWrapper,
-    SpacemouseIntervention,
     MultiCameraBinaryRewardClassifierWrapper,
     GripperCloseEnv,
 )
@@ -17,7 +16,9 @@ from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.networks.reward_classifier import load_classifier_func
 
 from experiments.config import DefaultTrainingConfig
-from experiments.motor_shaft_assembly.cr5af.wrapper import MotorShaftEnv, GripperPenaltyWrapper
+from experiments.motor_shaft_assembly.cr5af.wrapper import (
+    MotorShaftEnv, GripperPenaltyWrapper, ServerSpacemouseIntervention,
+)
 
 
 # TODO: fill in real values when CR5AF is connected and workspace is calibrated
@@ -35,14 +36,15 @@ class EnvConfig(DefaultCR5AFEnvConfig):
         "external": lambda img: img[100:400, 150:500],
     }
 
-    # TODO: calibrate with real robot
-    TARGET_POSE = np.zeros((6,))        # Insertion pose (hole position)
-    GRASP_POSE = np.zeros((6,))         # Shaft holder position (for learned-gripper mode)
-    RESET_POSE = np.zeros((6,))         # Start pose above hole
-    REWARD_THRESHOLD = np.zeros((6,))
+    # Calibrated 2025-05-18 with CR5AF
+    # Units: XYZ in meters, rotation in degrees
+    RESET_POSE = np.array([0.5000, -0.1500, 0.4000, 180.00, -0.00, 0.00])
+    GRASP_POSE = np.array([0.7000, -0.1750, 0.2000, -180.00, -0.00, 0.00])
+    TARGET_POSE = np.array([0.7100, -0.1750, 0.1260, -180.00, -0.00, 0.00])
+    REWARD_THRESHOLD = np.array([0.005, 0.005, 0.005, 2.0, 2.0, 2.0])
     ACTION_SCALE = (0.01, 0.06, 1)
-    ABS_POSE_LIMIT_LOW = np.zeros((6,))
-    ABS_POSE_LIMIT_HIGH = np.zeros((6,))
+    ABS_POSE_LIMIT_LOW = np.array([0.400, -0.300, 0.100, -180, -90, -180])
+    ABS_POSE_LIMIT_HIGH = np.array([0.800, 0.000, 0.500, 180, 90, 180])
 
     RANDOM_RESET = True
     RANDOM_XY_RANGE = 0.02
@@ -89,7 +91,7 @@ class TrainConfig(DefaultTrainingConfig):
             env = GripperCloseEnv(env)
 
         if not fake_env:
-            env = SpacemouseIntervention(env)
+            env = ServerSpacemouseIntervention(env, server_url=EnvConfig.SERVER_URL)
 
         env = RelativeFrame(env)
         env = Quat2EulerWrapper(env)

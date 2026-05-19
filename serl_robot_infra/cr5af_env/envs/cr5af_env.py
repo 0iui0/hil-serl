@@ -85,6 +85,7 @@ class CR5AFEnv(gym.Env):
         save_video=False,
         config: DefaultCR5AFEnvConfig = None,
     ):
+        self.fake_env = fake_env
         self.action_scale = config.ACTION_SCALE
         self._TARGET_POSE = config.TARGET_POSE
         self._RESET_POSE = config.RESET_POSE
@@ -98,7 +99,10 @@ class CR5AFEnv(gym.Env):
         self.resetpos = np.concatenate(
             [config.RESET_POSE[:3], euler_2_quat(config.RESET_POSE[3:])]
         )
-        self._update_currpos()
+        if not fake_env:
+            self._update_currpos()
+        else:
+            self.currpos = self.resetpos.copy()
         self.last_gripper_act = time.time()
         self.lastsent = time.time()
         self.randomreset = config.RANDOM_RESET
@@ -294,6 +298,11 @@ class CR5AFEnv(gym.Env):
         requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
 
     def reset(self, joint_reset=False, **kwargs):
+        if self.fake_env:
+            self.curr_path_length = 0
+            self.terminate = False
+            return self._get_obs(), {"succeed": False}
+
         self.last_gripper_act = time.time()
         requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
         if self.save_video:
@@ -374,6 +383,8 @@ class CR5AFEnv(gym.Env):
                 return
 
     def _update_currpos(self):
+        if self.fake_env:
+            return
         ps = requests.post(self.url + "getstate").json()
         self.currpos = np.array(ps["pose"])
         self.currvel = np.array(ps["vel"])
