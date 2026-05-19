@@ -45,3 +45,8 @@ Thumbs.db
 
 # Personal config
 .claude/
+
+# Generated/data
+.codegraph/
+classifier_ckpt/
+classifier_data/
