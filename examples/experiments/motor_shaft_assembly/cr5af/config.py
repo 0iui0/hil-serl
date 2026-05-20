@@ -63,12 +63,12 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     # FC impedance params (CR5AF FC mode stiffness/damping)
     # Higher damping prevents oscillation; moderate stiffness tracks SpaceMouse crisply
     COMPLIANCE_PARAM = {
-        "stiffness": [400, 400, 400, 30, 30, 30],
-        "damping": [120, 120, 120, 15, 15, 15],
+        "stiffness": [400, 400, 400, 60, 60, 60],
+        "damping": [120, 120, 120, 25, 25, 25],
     }
     PRECISION_PARAM = {
-        "stiffness": [2000, 2000, 2000, 100, 100, 100],
-        "damping": [30, 30, 30, 5, 5, 5],
+        "stiffness": [2000, 2000, 2000, 200, 200, 200],
+        "damping": [30, 30, 30, 10, 10, 10],
     }
 
 
