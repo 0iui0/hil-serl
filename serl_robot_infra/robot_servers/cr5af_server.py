@@ -455,7 +455,7 @@ class CR5AFServer:
             resp = self._send_cmd(cmd, timeout=30.0)
             if resp and resp[0] != '0':
                 print(f"MovL error: {resp} (attempt {attempt+1}/5)")
-                time.sleep(0.5)
+                self.clear_error()
             else:
                 return
         print(f"MovL failed after all attempts")
