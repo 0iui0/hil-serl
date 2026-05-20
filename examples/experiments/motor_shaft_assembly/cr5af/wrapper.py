@@ -131,7 +131,7 @@ class MotorShaftEnv(CR5AFEnv):
             reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
         else:
             reset_pose = self.resetpos.copy()
-            reset_pose[:2] += np.random.uniform(-0.003, 0.003, (2,))
+            reset_pose[:2] += np.random.uniform(-0.05, 0.05, (2,))
             euler_random = self._RESET_POSE[3:].copy()
             euler_random[-1] += np.random.uniform(-2.0, 2.0)
             reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
