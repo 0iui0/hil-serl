@@ -99,9 +99,16 @@ class MotorShaftEnv(CR5AFEnv):
         self._post("update_param", json=self.config.PRECISION_PARAM)
         time.sleep(0.3)
 
-        # Pull up to clear workpiece via MovL (blocking)
+        # Exit ServoP mode before MovL (CR5AF requires it)
+        self._post("stoprobot")
+        time.sleep(0.1)
+
+        # Pull up to clear workpiece via MovL (blocking).
+        # Use current XYZ but reset orientation — RT cache orientation may have
+        # drifted under FC compliance (e.g. shaft stuck in hole).
         self._update_currpos()
         pull_up = self.currpos.copy()
+        pull_up[3:] = self.resetpos[3:]
         pull_up[2] = self.resetpos[2] + 0.04
         self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 3}, timeout=30)
 

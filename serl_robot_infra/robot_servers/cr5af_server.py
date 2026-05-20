@@ -762,6 +762,13 @@ def main(argv):
         server.servop_pose(pos)
         return "Moved"
 
+    @webapp.route("/stoprobot", methods=["POST"])
+    def stop_robot():
+        """Stop robot and exit ServoP mode before MovL."""
+        if not server.safe:
+            server._send_cmd("StopRobot()")
+        return "Stopped"
+
     @webapp.route("/movl", methods=["POST"])
     def movl():
         """Move to Cartesian pose via MovL (queued, for point-to-point moves)."""
