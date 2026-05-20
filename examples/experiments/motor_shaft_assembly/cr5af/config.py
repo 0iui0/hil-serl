@@ -50,7 +50,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     RANDOM_XY_RANGE = 0.02
     RANDOM_RZ_RANGE = 0.05
     DISPLAY_IMAGE = True
-    MAX_EPISODE_LENGTH = 500            # 20s at 25Hz (more updates = smoother teleop)
+    MAX_EPISODE_LENGTH = 200            # 8s at 25Hz (aligned with Franka ~6-10s)
     # Per-step delta caps (25Hz × 3mm = 75mm/s; 6mm caused axis-3 power limit)
     MAX_TRANSLATION_DELTA_MM = 3.0
     MAX_ROTATION_DELTA_DEG = 3.0
