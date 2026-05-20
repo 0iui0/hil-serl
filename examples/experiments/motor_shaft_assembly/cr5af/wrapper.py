@@ -94,51 +94,6 @@ class MotorShaftEnv(CR5AFEnv):
         # Move to reset pose (above hole)
         self.go_to_reset(joint_reset=False)
 
-    def go_to_reset(self, joint_reset=False):
-        """Move to reset pose via ServoP interpolate_move (no mode switch).
-
-        Uses ServoP throughout — no stoprobot/MovL — so _target_pos stays
-        continuous across the reset→episode boundary.
-        """
-        self._post("update_param", json=self.config.PRECISION_PARAM)
-        time.sleep(0.3)
-
-        # Pull up to clear workpiece via ServoP.
-        # Use current XYZ but reset orientation — orientation may have drifted
-        # under FC compliance (e.g. shaft stuck in hole).
-        self._update_currpos()
-        pull_up = self.currpos.copy()
-        pull_up[3:] = self.resetpos[3:]
-        pull_up[2] = self.resetpos[2] + 0.04
-        self.interpolate_move(pull_up, timeout=2.0)
-
-        if joint_reset:
-            print("JOINT RESET")
-            self._post("jointreset")
-            time.sleep(0.5)
-
-        if self.randomreset:
-            reset_pose = self.resetpos.copy()
-            reset_pose[:2] += np.random.uniform(
-                -self.random_xy_range, self.random_xy_range, (2,)
-            )
-            euler_random = self._RESET_POSE[3:].copy()
-            euler_random[-1] += np.random.uniform(
-                -self.random_rz_range, self.random_rz_range
-            )
-            reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
-        else:
-            reset_pose = self.resetpos.copy()
-            reset_pose[:2] += np.random.uniform(-0.05, 0.05, (2,))
-            euler_random = self._RESET_POSE[3:].copy()
-            euler_random[-1] += np.random.uniform(-2.0, 2.0)
-            reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
-
-        # Move to reset pose via ServoP interpolate_move
-        self.interpolate_move(reset_pose, timeout=4.0)
-
-        self._post("update_param", json=self.config.COMPLIANCE_PARAM)
-
     def compute_reward(self, obs) -> bool:
         """Reward: insertion success (pose + force threshold)."""
         current_pose = obs["state"]["tcp_pose"]

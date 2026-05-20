@@ -334,8 +334,13 @@ class CR5AFEnv(gym.Env):
 
         if joint_reset:
             print("JOINT RESET")
+            # CR5AF MovJ cannot run while ServoP/FC is active; briefly exit
+            self._post("stoprobot")
+            time.sleep(0.1)
             self._post("jointreset")
             time.sleep(0.5)
+            self._post("update_param", json=self.config.PRECISION_PARAM)
+            time.sleep(0.3)
 
         if self.randomreset:
             reset_pose = self.resetpos.copy()
