@@ -307,12 +307,38 @@ class CR5AFEnv(gym.Env):
             goal = np.concatenate([goal[:3], R.from_euler("XYZ", goal[3:], degrees=True).as_quat()])
         steps = int(timeout * self.hz)
         self._update_currpos()
-        path = np.linspace(self.currpos, goal, steps)
-        for p in path:
+
+        start_pos = self.currpos[:3].copy()
+        start_quat = self.currpos[3:].copy()
+        goal_pos = goal[:3].copy()
+        goal_quat = goal[3:].copy()
+
+        # Ensure shortest quaternion path (q and -q are the same rotation)
+        if np.dot(start_quat, goal_quat) < 0:
+            goal_quat = -goal_quat
+
+        for i in range(steps):
+            t = (i + 1) / steps
+            pos = (1 - t) * start_pos + t * goal_pos
+            quat = self._slerp(start_quat, goal_quat, t)
+            p = np.concatenate([pos, quat])
             self._send_pos_command(p)
             time.sleep(1 / self.hz)
-        self.nextpos = p
+        self.nextpos = goal
         self._update_currpos()
+
+    @staticmethod
+    def _slerp(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
+        """Spherical linear interpolation for unit quaternions."""
+        dot = np.dot(q0, q1)
+        dot = np.clip(dot, -1.0, 1.0)
+        theta = np.arccos(dot) * t
+        q_perp = q1 - q0 * dot
+        norm = np.linalg.norm(q_perp)
+        if norm < 1e-12:
+            return q0.copy()
+        q_perp = q_perp / norm
+        return q0 * np.cos(theta) + q_perp * np.sin(theta)
 
     def go_to_reset(self, joint_reset=False):
         """Move to reset pose via ServoP interpolate_move (no mode switch).
