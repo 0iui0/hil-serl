@@ -256,10 +256,15 @@ class CR5AFEnv(gym.Env):
         time.sleep(max(0, (1.0 / self.hz) - dt))
 
         self._update_currpos()
-        # Drift detection: if external MovL moved the robot, re-sync tracked target
-        pos_err = np.linalg.norm(self.currpos[:3] - self._target_pos[:3])
-        if pos_err > self.max_translation_delta * 3:
-            self._target_pos = self.currpos.copy()
+        # Drift detection: if external MovL moved the robot, re-sync tracked target.
+        # Skip first N steps after reset — RT cache lags behind MovL (stale pre-reset
+        # position) and would falsely trigger a jump-back.
+        if self._drift_guard > 0:
+            self._drift_guard -= 1
+        else:
+            pos_err = np.linalg.norm(self.currpos[:3] - self._target_pos[:3])
+            if pos_err > self.max_translation_delta * 3:
+                self._target_pos = self.currpos.copy()
         ob = self._get_obs()
         reward = self.compute_reward(ob)
         done = self.curr_path_length >= self.max_episode_length or reward or self.terminate
@@ -381,6 +386,8 @@ class CR5AFEnv(gym.Env):
         # Override pose: RT cache may lag after MovL; we know where the robot is
         self.currpos = self.resetpos.copy()
         self._target_pos = None  # force re-init on first step of new episode
+        self._servop_active = False
+        self._drift_guard = 3    # skip drift detection first 3 steps (RT lags MovL)
         obs = self._get_obs()
         self.terminate = False
         return obs, {"succeed": False}

@@ -51,6 +51,8 @@ class MotorShaftEnv(CR5AFEnv):
         # Override pose: RT cache may lag after MovL; we know where the robot is
         self.currpos = self.resetpos.copy()
         self._target_pos = None  # force re-init on first step of new episode
+        self._servop_active = False
+        self._drift_guard = 3    # skip drift detection first 3 steps (RT lags MovL)
         obs = self._get_obs()
         self.terminate = False
         return obs, {"succeed": False}
