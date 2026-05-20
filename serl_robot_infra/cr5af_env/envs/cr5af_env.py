@@ -235,14 +235,10 @@ class CR5AFEnv(gym.Env):
                 # Apply delta to TRACKED target (not RT cache), eliminating feedback oscillation
                 self.nextpos = self._target_pos.copy()
                 self.nextpos[:3] = self.nextpos[:3] + xyz_delta_m
-                new_quat = (
+                self.nextpos[3:] = (
                     R.from_rotvec(rot_delta)
                     * R.from_quat(self._target_pos[3:])
                 ).as_quat()
-                curr_euler = R.from_quat(self._target_pos[3:]).as_euler("XYZ")
-                new_euler = R.from_quat(new_quat).as_euler("XYZ")
-                diff_euler = (new_euler - curr_euler + np.pi) % (2 * np.pi) - np.pi
-                self.nextpos[3:] = R.from_euler("XYZ", curr_euler + diff_euler).as_quat()
 
                 self._send_pos_command(self.clip_safety_box(self.nextpos))
                 self._target_pos = self.nextpos.copy()
