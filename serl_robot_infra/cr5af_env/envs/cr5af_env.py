@@ -214,9 +214,10 @@ class CR5AFEnv(gym.Env):
         gripper_action = action[6] * self.action_scale[2]
         self._send_gripper_command(gripper_action)
 
-        # Initialize or re-sync tracked target from RT on first step after reset
+        # Initialize tracked target on first step after reset.
+        # Trust self.currpos (set by reset()/go_to_reset() after MovL) —
+        # _update_currpos() would read stale RT cache that lags behind MovL.
         if self._target_pos is None:
-            self._update_currpos()
             self._target_pos = self.currpos.copy()
 
         if np.max(np.abs(action[:6])) > 1e-6:
