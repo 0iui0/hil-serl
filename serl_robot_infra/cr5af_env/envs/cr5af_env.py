@@ -115,6 +115,7 @@ class CR5AFEnv(gym.Env):
         self.min_delta = config.MIN_DELTA_MM / 1000.0
         self._servop_active = False
         self._target_pos: np.ndarray | None = None  # tracked ServoP target, not RT cache
+        self._drift_guard = 0  # steps to skip drift detection (set by reset())
 
         self.resetpos = np.concatenate(
             [config.RESET_POSE[:3], R.from_euler("XYZ", config.RESET_POSE[3:], degrees=True).as_quat()]
