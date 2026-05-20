@@ -428,7 +428,6 @@ class CR5AFEnv(gym.Env):
 
     def _send_pos_command(self, pos: np.ndarray) -> dict | None:
         """Send ServoP and return parsed state from response (combines /pose + /getstate)."""
-        self._recover()
         arr = np.array(pos).astype(np.float32)
         data = {"arr": arr.tolist()}
         r = self._post("pose", json=data)
