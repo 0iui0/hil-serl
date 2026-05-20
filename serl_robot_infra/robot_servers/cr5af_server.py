@@ -451,9 +451,14 @@ class CR5AFServer:
         if v > 0:
             cmd += f",v={v}"
         cmd += ")"
-        resp = self._send_cmd(cmd, timeout=30.0)
-        if resp and resp[0] != '0':
-            print(f"MovL error: {resp}")
+        for attempt in range(5):
+            resp = self._send_cmd(cmd, timeout=30.0)
+            if resp and resp[0] != '0':
+                print(f"MovL error: {resp} (attempt {attempt+1}/5)")
+                time.sleep(0.5)
+            else:
+                return
+        print(f"MovL failed after all attempts")
 
     def move_to_pose_no_wait(self, pose: np.ndarray):
         """Send MovL fire-and-forget (for non-critical queued moves)."""
