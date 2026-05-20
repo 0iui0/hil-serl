@@ -1,5 +1,7 @@
 import copy
 import os
+import signal
+import sys
 from tqdm import tqdm
 import numpy as np
 import pickle as pkl
@@ -13,6 +15,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("successes_needed", 200, "Number of successful transistions to collect.")
 flags.DEFINE_string("server_url", "http://127.0.0.1:5000/", "URL of the robot server.")
+flags.DEFINE_integer("save_every", 20, "Save intermediate data every N successes.")
 
 
 success_key = False
@@ -24,23 +27,49 @@ def on_press(key):
     except AttributeError:
         pass
 
+
+def save_data(successes, failures, success_needed, suffix=""):
+    """Save collected data to classifier_data/. Returns file paths."""
+    if not os.path.exists("./classifier_data"):
+        os.makedirs("./classifier_data")
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    stem = f"./classifier_data/{FLAGS.exp_name}_{len(successes)}of{success_needed}{suffix}_{ts}"
+    s_path = f"{stem}_success.pkl"
+    with open(s_path, "wb") as f:
+        pkl.dump(successes, f)
+    f_path = f"{stem}_failure.pkl"
+    with open(f_path, "wb") as f:
+        pkl.dump(failures, f)
+    print(f"Saved: {len(successes)} success + {len(failures)} failure -> {s_path}")
+
+
 def main(_):
     global success_key
-    listener = keyboard.Listener(
-        on_press=on_press)
+    listener = keyboard.Listener(on_press=on_press)
     listener.start()
+
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
-    env = config.get_environment(fake_env=False, save_video=False, classifier=False, server_url=FLAGS.server_url)
+    env = config.get_environment(fake_env=False, save_video=False,
+                                 classifier=False, server_url=FLAGS.server_url)
 
     obs, _ = env.reset()
     successes = []
     failures = []
     success_needed = FLAGS.successes_needed
+    save_every = FLAGS.save_every
     pbar = tqdm(total=success_needed)
-    
+
+    def on_exit(sig=None, frame=None):
+        print(f"\nInterrupted. Saving {len(successes)} success + {len(failures)} failure...")
+        save_data(successes, failures, success_needed, suffix="_interrupted")
+        env.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, on_exit)
+
     while len(successes) < success_needed:
-        actions = np.zeros(env.action_space.sample().shape) 
+        actions = np.zeros(env.action_space.sample().shape)
         next_obs, rew, done, truncated, info = env.step(actions)
         if "intervene_action" in info:
             actions = info["intervene_action"]
@@ -60,24 +89,18 @@ def main(_):
             successes.append(transition)
             pbar.update(1)
             success_key = False
+            print(f"\n[SPACE] success #{len(successes)} recorded")
+            if len(successes) % save_every == 0:
+                save_data(successes, failures, success_needed)
         else:
             failures.append(transition)
 
         if done or truncated:
             obs, _ = env.reset()
 
-    if not os.path.exists("./classifier_data"):
-        os.makedirs("./classifier_data")
-    uuid = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    file_name = f"./classifier_data/{FLAGS.exp_name}_{success_needed}_success_images_{uuid}.pkl"
-    with open(file_name, "wb") as f:
-        pkl.dump(successes, f)
-        print(f"saved {success_needed} successful transitions to {file_name}")
+    env.close()
+    save_data(successes, failures, success_needed)
+    print("Done.")
 
-    file_name = f"./classifier_data/{FLAGS.exp_name}_failure_images_{uuid}.pkl"
-    with open(file_name, "wb") as f:
-        pkl.dump(failures, f)
-        print(f"saved {len(failures)} failure transitions to {file_name}")
-        
 if __name__ == "__main__":
     app.run(main)
