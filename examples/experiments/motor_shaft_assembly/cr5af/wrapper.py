@@ -48,6 +48,9 @@ class MotorShaftEnv(CR5AFEnv):
         self.success = False
 
         self._update_currpos()
+        # Override pose: RT cache may lag after MovL; we know where the robot is
+        self.currpos = self.resetpos.copy()
+        self._target_pos = None  # force re-init on first step of new episode
         obs = self._get_obs()
         self.terminate = False
         return obs, {"succeed": False}
@@ -100,7 +103,7 @@ class MotorShaftEnv(CR5AFEnv):
         self._update_currpos()
         pull_up = self.currpos.copy()
         pull_up[2] = self.resetpos[2] + 0.04
-        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 20}, timeout=30)
+        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 10}, timeout=30)
 
         if joint_reset:
             print("JOINT RESET")
@@ -122,9 +125,12 @@ class MotorShaftEnv(CR5AFEnv):
             reset_pose = self.resetpos.copy()
 
         # Move to reset pose via MovL (blocking, smooth)
-        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 20}, timeout=30)
+        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 10}, timeout=30)
 
         self._post("update_param", json=self.config.COMPLIANCE_PARAM)
+
+        # Trust MovL result rather than RT cache (which may lag)
+        self.currpos = reset_pose.copy()
 
     def compute_reward(self, obs) -> bool:
         """Reward: insertion success (pose + force threshold)."""
@@ -220,6 +226,7 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
             print("WARNING: SpaceMouse calibration failed, using zeros")
 
     _step_count: int = 0
+    _ema_alpha: float = 0.5  # EMA smoothing factor (0.5 = ~5 sample settling time)
 
     def action(self, action: np.ndarray) -> tuple[np.ndarray, bool]:
         try:
@@ -236,6 +243,16 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
         if self._zero_offset is not None:
             expert_a[:6] -= self._zero_offset
 
+        # EMA smoothing to suppress sensor jitter (standalone teleop doesn't need
+        # this at 33Hz, but at 25Hz the per-step delta is large enough that raw
+        # sensor noise causes visible vibration)
+        if not hasattr(self, '_smoothed_a'):
+            self._smoothed_a = expert_a[:6].copy()
+        else:
+            self._smoothed_a = (self._ema_alpha * expert_a[:6]
+                                + (1 - self._ema_alpha) * self._smoothed_a)
+        expert_a[:6] = self._smoothed_a
+
         self.left, self.right = buttons[0], buttons[1]
         intervened = False
 
@@ -250,14 +267,12 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
         intervened = True
 
         if self.gripper_enabled:
-            if self.left:
-                gripper_action = np.random.uniform(-1, -0.9, size=(1,))
-                intervened = True
-            elif self.right:
-                gripper_action = np.random.uniform(0.9, 1, size=(1,))
+            if self.right:
+                # Right button: open gripper
+                gripper_action = np.array([1.0], dtype=np.float32)
                 intervened = True
             else:
-                gripper_action = np.zeros((1,))
+                gripper_action = np.zeros((1,), dtype=np.float32)
             expert_a = np.concatenate((expert_a, gripper_action))
 
         if intervened:

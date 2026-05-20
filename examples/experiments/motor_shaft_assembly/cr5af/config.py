@@ -38,7 +38,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
 
     # Calibrated 2025-05-18 with CR5AF
     # Units: XYZ in meters, rotation in degrees
-    RESET_POSE = np.array([0.4500, -0.150, 0.300, 178, 0, 0])
+    RESET_POSE = np.array([0.6500, -0.150, 0.220, 179.9, 0, 0])
     GRASP_POSE = np.array([0.7000, -0.1750, 0.2000, -180.00, -0.00, 0.00])
     TARGET_POSE = np.array([0.7100, -0.1750, 0.1260, -180.00, -0.00, 0.00])
     REWARD_THRESHOLD = np.array([0.005, 0.005, 0.005, 2.0, 2.0, 2.0])
@@ -50,16 +50,21 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     RANDOM_XY_RANGE = 0.02
     RANDOM_RZ_RANGE = 0.05
     DISPLAY_IMAGE = True
-    MAX_EPISODE_LENGTH = 200            # 20s at 10Hz (longer for manual teleop data collection)
+    MAX_EPISODE_LENGTH = 500            # 20s at 25Hz (more updates = smoother teleop)
+    # Per-step delta caps (keep max speed ~50mm/s: 25Hz × 2mm = 50mm/s)
+    MAX_TRANSLATION_DELTA_MM = 2.0
+    MAX_ROTATION_DELTA_DEG = 2.0
+    MIN_DELTA_MM = 0.05                 # lower threshold for more responsive fine control
 
     # Gripper mode switch
     USE_GRIPPER = False                 # False = fixed-flange (current), True = learned-gripper (future)
     GRASP_FORCE_THRESHOLD = 2.0         # N, minimum force to confirm grasp
 
     # FC impedance params (CR5AF FC mode stiffness/damping)
+    # Higher damping prevents oscillation; moderate stiffness tracks SpaceMouse crisply
     COMPLIANCE_PARAM = {
-        "stiffness": [500, 500, 500, 30, 30, 30],
-        "damping": [10, 10, 10, 1, 1, 1],
+        "stiffness": [400, 400, 400, 30, 30, 30],
+        "damping": [120, 120, 120, 15, 15, 15],
     }
     PRECISION_PARAM = {
         "stiffness": [2000, 2000, 2000, 100, 100, 100],
@@ -87,6 +92,7 @@ class TrainConfig(DefaultTrainingConfig):
             fake_env=fake_env,
             save_video=save_video,
             config=env_config,
+            hz=25,
         )
 
         # Fixed-flange: mask out gripper action

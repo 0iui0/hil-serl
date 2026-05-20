@@ -21,6 +21,7 @@ import time
 import struct
 import socket
 import threading
+import logging
 import numpy as np
 from flask import Flask, request, jsonify
 from scipy.spatial.transform import Rotation as R
@@ -602,15 +603,15 @@ class CR5AFServer:
 
     def fc_set_stiffness(self, vals: list[float]) -> str:
         cmd = "FCSetStiffness(" + ",".join(f"{v}" for v in vals) + ")"
-        return self._send_cmd(cmd)
+        return self._send_cmd(cmd, read_response=False)
 
     def fc_set_damping(self, vals: list[float]) -> str:
         cmd = "FCSetDamping(" + ",".join(f"{v}" for v in vals) + ")"
-        return self._send_cmd(cmd)
+        return self._send_cmd(cmd, read_response=False)
 
     def fc_set_mass(self, vals: list[float]) -> str:
         cmd = "FCSetMass(" + ",".join(f"{v}" for v in vals) + ")"
-        return self._send_cmd(cmd)
+        return self._send_cmd(cmd, read_response=False)
 
     def fc_set_force_limit(self, vals: list[float]) -> str:
         cmd = "FCSetForceLimit(" + ",".join(f"{v}" for v in vals) + ")"
@@ -639,6 +640,9 @@ class CR5AFServer:
 
 def main(argv):
     webapp = Flask(__name__)
+
+    # Suppress Flask HTTP request logs (noise that drowns out ServoP commands)
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
     server = CR5AFServer(
         robot_ip=FLAGS.robot_ip,

@@ -24,7 +24,6 @@ import requests
 from scipy.spatial.transform import Rotation as R
 
 from franka_env.camera.rs_capture import RSCapture
-from franka_env.utils.rotations import euler_2_quat, quat_2_euler
 
 
 class ImageDisplayer(threading.Thread):
@@ -85,6 +84,10 @@ class DefaultCR5AFEnvConfig:
     GRIPPER_SLEEP: float = 0.6
     MAX_EPISODE_LENGTH: int = 100
     JOINT_RESET_PERIOD: int = 0
+    # Per-step delta limiting (mimics Franka's per-cycle impedance clips)
+    MAX_TRANSLATION_DELTA_MM: float = 3.0    # cap single-step translation per axis
+    MAX_ROTATION_DELTA_DEG: float = 3.0      # cap single-step rotation
+    MIN_DELTA_MM: float = 0.1                # skip ServoP below this (lower = less filtering)
 
 
 class CR5AFEnv(gym.Env):
@@ -107,6 +110,11 @@ class CR5AFEnv(gym.Env):
         self.max_episode_length = config.MAX_EPISODE_LENGTH
         self.display_image = config.DISPLAY_IMAGE
         self.gripper_sleep = config.GRIPPER_SLEEP
+        self.max_translation_delta = config.MAX_TRANSLATION_DELTA_MM / 1000.0  # per-axis
+        self.max_rotation_delta = np.deg2rad(config.MAX_ROTATION_DELTA_DEG)
+        self.min_delta = config.MIN_DELTA_MM / 1000.0
+        self._servop_active = False
+        self._target_pos: np.ndarray | None = None  # tracked ServoP target, not RT cache
 
         self.resetpos = np.concatenate(
             [config.RESET_POSE[:3], R.from_euler("XYZ", config.RESET_POSE[3:], degrees=True).as_quat()]
@@ -206,9 +214,12 @@ class CR5AFEnv(gym.Env):
         gripper_action = action[6] * self.action_scale[2]
         self._send_gripper_command(gripper_action)
 
-        # Skip ServoP when action is effectively zero (no human input)
+        # Initialize or re-sync tracked target from RT on first step after reset
+        if self._target_pos is None:
+            self._update_currpos()
+            self._target_pos = self.currpos.copy()
+
         if np.max(np.abs(action[:6])) > 1e-6:
-            # Sign convention matches teleop_cr5af.py: -dx, +dy, -dz
             dx, dy, dz, droll, dpitch, dyaw = action[:6]
             xyz_delta_m = np.array([
                 -dx * self.action_scale[0],
@@ -216,24 +227,42 @@ class CR5AFEnv(gym.Env):
                 -dz * self.action_scale[0],
             ])
             rot_delta = np.array([droll, dpitch, dyaw]) * self.action_scale[1]
-            self.nextpos = self.currpos.copy()
-            self.nextpos[:3] = self.nextpos[:3] + xyz_delta_m
-            self.nextpos[3:] = (
-                R.from_rotvec(rot_delta)
-                * R.from_quat(self.currpos[3:])
-            ).as_quat()
-            self._send_pos_command(self.clip_safety_box(self.nextpos))
-            # DEBUG: trace action → ServoP delta
-            print(f"[STEP] act={np.round(action[:6], 3).tolist()} "
-                  f"dmm={np.round(xyz_delta_m * 1000, 1).tolist()} "
-                  f"curr={np.round(self.currpos[:3] * 1000, 1).tolist()} "
-                  f"next={np.round(self.nextpos[:3] * 1000, 1).tolist()}")
+
+            xyz_delta_m = np.clip(xyz_delta_m, -self.max_translation_delta, self.max_translation_delta)
+            rot_delta = np.clip(rot_delta, -self.max_rotation_delta, self.max_rotation_delta)
+
+            if np.max(np.abs(xyz_delta_m)) >= self.min_delta or np.max(np.abs(rot_delta)) >= self.min_delta:
+                # Apply delta to TRACKED target (not RT cache), eliminating feedback oscillation
+                self.nextpos = self._target_pos.copy()
+                self.nextpos[:3] = self.nextpos[:3] + xyz_delta_m
+                new_quat = (
+                    R.from_rotvec(rot_delta)
+                    * R.from_quat(self._target_pos[3:])
+                ).as_quat()
+                curr_euler = R.from_quat(self._target_pos[3:]).as_euler("XYZ")
+                new_euler = R.from_quat(new_quat).as_euler("XYZ")
+                diff_euler = (new_euler - curr_euler + np.pi) % (2 * np.pi) - np.pi
+                self.nextpos[3:] = R.from_euler("XYZ", curr_euler + diff_euler).as_quat()
+
+                self._send_pos_command(self.clip_safety_box(self.nextpos))
+                self._target_pos = self.nextpos.copy()
+                self._servop_active = True
+            elif self._servop_active:
+                self._send_pos_command(self.clip_safety_box(self._target_pos))
+                self._servop_active = False
+        elif self._servop_active:
+            self._send_pos_command(self.clip_safety_box(self._target_pos))
+            self._servop_active = False
 
         self.curr_path_length += 1
         dt = time.time() - start_time
         time.sleep(max(0, (1.0 / self.hz) - dt))
 
         self._update_currpos()
+        # Drift detection: if external MovL moved the robot, re-sync tracked target
+        pos_err = np.linalg.norm(self.currpos[:3] - self._target_pos[:3])
+        if pos_err > self.max_translation_delta * 3:
+            self._target_pos = self.currpos.copy()
         ob = self._get_obs()
         reward = self.compute_reward(ob)
         done = self.curr_path_length >= self.max_episode_length or reward or self.terminate
@@ -295,7 +324,7 @@ class CR5AFEnv(gym.Env):
         self._update_currpos()
         pull_up = self.currpos.copy()
         pull_up[2] = self.resetpos[2] + 0.04
-        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 20}, timeout=30)
+        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 10}, timeout=30)
 
         if joint_reset:
             print("JOINT RESET")
@@ -316,9 +345,12 @@ class CR5AFEnv(gym.Env):
             reset_pose = self.resetpos.copy()
 
         # Move to reset pose via MovL (blocking, smooth)
-        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 20}, timeout=30)
+        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 10}, timeout=30)
 
         self._post("update_param", json=self.config.COMPLIANCE_PARAM)
+
+        # Trust MovL result rather than RT cache (which may lag)
+        self.currpos = reset_pose.copy()
 
     def reset(self, joint_reset=False, **kwargs):
         if self.fake_env:
@@ -342,6 +374,9 @@ class CR5AFEnv(gym.Env):
         self.curr_path_length = 0
 
         self._update_currpos()
+        # Override pose: RT cache may lag after MovL; we know where the robot is
+        self.currpos = self.resetpos.copy()
+        self._target_pos = None  # force re-init on first step of new episode
         obs = self._get_obs()
         self.terminate = False
         return obs, {"succeed": False}
