@@ -220,6 +220,8 @@ class CR5AFEnv(gym.Env):
         if self._target_pos is None:
             self._target_pos = self.currpos.copy()
 
+        state_updated = False
+
         if np.max(np.abs(action[:6])) > 1e-6:
             dx, dy, dz, droll, dpitch, dyaw = action[:6]
             xyz_delta_m = np.array([
@@ -244,18 +246,22 @@ class CR5AFEnv(gym.Env):
                 self._send_pos_command(self.clip_safety_box(self.nextpos))
                 self._target_pos = self.nextpos.copy()
                 self._servop_active = True
+                state_updated = True
             elif self._servop_active:
                 self._send_pos_command(self.clip_safety_box(self._target_pos))
                 self._servop_active = False
+                state_updated = True
         elif self._servop_active:
             self._send_pos_command(self.clip_safety_box(self._target_pos))
             self._servop_active = False
+            state_updated = True
 
         self.curr_path_length += 1
         dt = time.time() - start_time
         time.sleep(max(0, (1.0 / self.hz) - dt))
 
-        self._update_currpos()
+        if not state_updated:
+            self._update_currpos()
         ob = self._get_obs()
         reward = self.compute_reward(ob)
         done = self.curr_path_length >= self.max_episode_length or reward or self.terminate
@@ -420,11 +426,29 @@ class CR5AFEnv(gym.Env):
     def _recover(self):
         self._post("clearerr")
 
-    def _send_pos_command(self, pos: np.ndarray):
+    def _send_pos_command(self, pos: np.ndarray) -> dict | None:
+        """Send ServoP and return parsed state from response (combines /pose + /getstate)."""
         self._recover()
         arr = np.array(pos).astype(np.float32)
         data = {"arr": arr.tolist()}
-        self._post("pose", json=data)
+        r = self._post("pose", json=data)
+        if r.status_code != 200:
+            return None
+        ps = r.json()
+        self.currpos = np.array(ps["pose"])
+        self.currvel = np.array(ps["vel"])
+        self.currforce = np.array(ps["force"])
+        self.currtorque = np.array(ps["torque"])
+        self.q = np.array(ps["q"])
+        self.dq = np.array(ps["dq"])
+        self.curr_gripper_pos = np.array(ps["gripper_pos"])
+        sf = ps.get("six_force")
+        if sf is not None:
+            sf = np.array(sf)
+            if sf.shape == (6,) and np.any(sf != 0):
+                self.currforce = sf[:3]
+                self.currtorque = sf[3:6]
+        return ps
 
     def _send_gripper_command(self, pos: float, mode="binary"):
         """Gripper commands are no-ops until gripper hardware is connected."""

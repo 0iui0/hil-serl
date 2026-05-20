@@ -754,13 +754,23 @@ def main(argv):
 
     @webapp.route("/pose", methods=["POST"])
     def pose():
-        """Move to Cartesian pose via ServoP for real-time teleop control."""
+        """Send ServoP and return current state (combines /pose + /getstate)."""
         err = _require_not_safe()
         if err:
             return err
         pos = np.array(request.json["arr"])
         server.servop_pose(pos)
-        return "Moved"
+        with server.lock:
+            return jsonify({
+                "pose": server.pos.tolist(),
+                "vel": server.vel.tolist(),
+                "force": server.force.tolist(),
+                "torque": server.torque.tolist(),
+                "q": server.q.tolist(),
+                "dq": server.dq.tolist(),
+                "gripper_pos": server.gripper_pos,
+                "six_force": server.six_force.tolist(),
+            })
 
     @webapp.route("/stoprobot", methods=["POST"])
     def stop_robot():
