@@ -234,7 +234,6 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
             print("WARNING: SpaceMouse calibration failed, using zeros")
 
     _step_count: int = 0
-    _ema_alpha: float = 0.5  # EMA smoothing factor (0.5 = ~5 sample settling time)
 
     def action(self, action: np.ndarray) -> tuple[np.ndarray, bool]:
         try:
@@ -250,16 +249,6 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
 
         if self._zero_offset is not None:
             expert_a[:6] -= self._zero_offset
-
-        # EMA smoothing to suppress sensor jitter (standalone teleop doesn't need
-        # this at 33Hz, but at 25Hz the per-step delta is large enough that raw
-        # sensor noise causes visible vibration)
-        if not hasattr(self, '_smoothed_a'):
-            self._smoothed_a = expert_a[:6].copy()
-        else:
-            self._smoothed_a = (self._ema_alpha * expert_a[:6]
-                                + (1 - self._ema_alpha) * self._smoothed_a)
-        expert_a[:6] = self._smoothed_a
 
         self.left, self.right = buttons[0], buttons[1]
         intervened = False
