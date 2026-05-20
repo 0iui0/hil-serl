@@ -51,9 +51,9 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     RANDOM_RZ_RANGE = 0.05
     DISPLAY_IMAGE = True
     MAX_EPISODE_LENGTH = 500            # 20s at 25Hz (more updates = smoother teleop)
-    # Per-step delta caps (25Hz × 6mm = 150mm/s, vs teleop 33Hz × 8mm = 264mm/s)
-    MAX_TRANSLATION_DELTA_MM = 6.0
-    MAX_ROTATION_DELTA_DEG = 6.0
+    # Per-step delta caps (25Hz × 3mm = 75mm/s; 6mm caused axis-3 power limit)
+    MAX_TRANSLATION_DELTA_MM = 3.0
+    MAX_ROTATION_DELTA_DEG = 3.0
     MIN_DELTA_MM = 0.05                 # lower threshold for more responsive fine control
 
     # Gripper mode switch

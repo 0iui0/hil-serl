@@ -424,7 +424,7 @@ class CR5AFEnv(gym.Env):
             print(f"Failed to close cameras: {e}")
 
     def _recover(self):
-        self._post("clearerr")
+        self._post("full_recovery")
 
     def _send_pos_command(self, pos: np.ndarray) -> dict | None:
         """Send ServoP and return parsed state from response (combines /pose + /getstate)."""
