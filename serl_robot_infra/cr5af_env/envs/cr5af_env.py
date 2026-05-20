@@ -349,6 +349,10 @@ class CR5AFEnv(gym.Env):
             reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
         else:
             reset_pose = self.resetpos.copy()
+            reset_pose[:2] += np.random.uniform(-0.003, 0.003, (2,))
+            euler_random = self._RESET_POSE[3:].copy()
+            euler_random[-1] += np.random.uniform(-2.0, 2.0)
+            reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
 
         # Move to reset pose via MovL (blocking, smooth)
         self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 3}, timeout=30)
