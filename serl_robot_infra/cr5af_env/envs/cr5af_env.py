@@ -115,7 +115,6 @@ class CR5AFEnv(gym.Env):
         self.min_delta = config.MIN_DELTA_MM / 1000.0
         self._servop_active = False
         self._target_pos: np.ndarray | None = None  # tracked ServoP target, not RT cache
-        self._drift_guard = 0  # steps to skip drift detection (set by reset())
 
         self.resetpos = np.concatenate(
             [config.RESET_POSE[:3], R.from_euler("XYZ", config.RESET_POSE[3:], degrees=True).as_quat()]
@@ -221,8 +220,6 @@ class CR5AFEnv(gym.Env):
         if self._target_pos is None:
             self._target_pos = self.currpos.copy()
 
-        servop_sent = False
-
         if np.max(np.abs(action[:6])) > 1e-6:
             dx, dy, dz, droll, dpitch, dyaw = action[:6]
             xyz_delta_m = np.array([
@@ -247,31 +244,18 @@ class CR5AFEnv(gym.Env):
                 self._send_pos_command(self.clip_safety_box(self.nextpos))
                 self._target_pos = self.nextpos.copy()
                 self._servop_active = True
-                servop_sent = True
             elif self._servop_active:
                 self._send_pos_command(self.clip_safety_box(self._target_pos))
                 self._servop_active = False
-                servop_sent = True
         elif self._servop_active:
             self._send_pos_command(self.clip_safety_box(self._target_pos))
             self._servop_active = False
-            servop_sent = True
 
         self.curr_path_length += 1
         dt = time.time() - start_time
         time.sleep(max(0, (1.0 / self.hz) - dt))
 
         self._update_currpos()
-        # Drift detection: if external MovL moved the robot, re-sync tracked target.
-        # Guard counts ServoP sends only — dead-zone steps don't consume guard.
-        # RT cache lags behind MovL (stale pre-reset position) and would falsely
-        # trigger a jump-back if drift detection fires too soon.
-        if servop_sent and self._drift_guard > 0:
-            self._drift_guard -= 1
-        elif self._drift_guard == 0:
-            pos_err = np.linalg.norm(self.currpos[:3] - self._target_pos[:3])
-            if pos_err > self.max_translation_delta * 3:
-                self._target_pos = self.currpos.copy()
         ob = self._get_obs()
         reward = self.compute_reward(ob)
         done = self.curr_path_length >= self.max_episode_length or reward or self.terminate
@@ -394,7 +378,6 @@ class CR5AFEnv(gym.Env):
         self.currpos = self.resetpos.copy()
         self._target_pos = None  # force re-init on first step of new episode
         self._servop_active = False
-        self._drift_guard = 5    # skip drift detection first 5 ServoP sends after reset
         obs = self._get_obs()
         self.terminate = False
         return obs, {"succeed": False}
