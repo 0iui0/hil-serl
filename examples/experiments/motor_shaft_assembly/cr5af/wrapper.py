@@ -103,7 +103,7 @@ class MotorShaftEnv(CR5AFEnv):
         self._update_currpos()
         pull_up = self.currpos.copy()
         pull_up[2] = self.resetpos[2] + 0.04
-        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 10}, timeout=30)
+        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 3}, timeout=30)
 
         if joint_reset:
             print("JOINT RESET")
@@ -125,7 +125,7 @@ class MotorShaftEnv(CR5AFEnv):
             reset_pose = self.resetpos.copy()
 
         # Move to reset pose via MovL (blocking, smooth)
-        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 10}, timeout=30)
+        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 3}, timeout=30)
 
         self._post("update_param", json=self.config.COMPLIANCE_PARAM)
 
