@@ -315,22 +315,22 @@ class CR5AFEnv(gym.Env):
         self._update_currpos()
 
     def go_to_reset(self, joint_reset=False):
-        """Pull up first, then move to reset pose via MovL (smooth, robot-planned)."""
+        """Move to reset pose via ServoP interpolate_move (no mode switch).
+
+        Uses ServoP throughout — no stoprobot/MovL — so _target_pos stays
+        continuous and RT cache doesn't drift behind the actual pose.
+        """
         self._post("update_param", json=self.config.PRECISION_PARAM)
         time.sleep(0.3)
 
-        # Exit ServoP mode before MovL (CR5AF requires it)
-        self._post("stoprobot")
-        time.sleep(0.1)
-
-        # Pull up above workpiece via MovL (blocking, smooth).
-        # Use current XYZ but reset orientation — RT cache orientation may have
-        # drifted under FC compliance (e.g. shaft stuck in hole).
+        # Pull up to clear workpiece via ServoP.
+        # Use current XYZ but reset orientation — orientation may have drifted
+        # under FC compliance (e.g. shaft stuck in hole).
         self._update_currpos()
         pull_up = self.currpos.copy()
         pull_up[3:] = self.resetpos[3:]
         pull_up[2] = self.resetpos[2] + 0.04
-        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 3}, timeout=30)
+        self.interpolate_move(pull_up, timeout=2.0)
 
         if joint_reset:
             print("JOINT RESET")
@@ -354,13 +354,10 @@ class CR5AFEnv(gym.Env):
             euler_random[-1] += np.random.uniform(-2.0, 2.0)
             reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
 
-        # Move to reset pose via MovL (blocking, smooth)
-        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 3}, timeout=30)
+        # Move to reset pose via ServoP interpolate_move
+        self.interpolate_move(reset_pose, timeout=4.0)
 
         self._post("update_param", json=self.config.COMPLIANCE_PARAM)
-
-        # Trust MovL result rather than RT cache (which may lag)
-        self.currpos = reset_pose.copy()
 
     def reset(self, joint_reset=False, **kwargs):
         if self.fake_env:
@@ -384,8 +381,6 @@ class CR5AFEnv(gym.Env):
         self.curr_path_length = 0
 
         self._update_currpos()
-        # Override pose: RT cache may lag after MovL; we know where the robot is
-        self.currpos = self.resetpos.copy()
         self._target_pos = None  # force re-init on first step of new episode
         self._servop_active = False
         obs = self._get_obs()

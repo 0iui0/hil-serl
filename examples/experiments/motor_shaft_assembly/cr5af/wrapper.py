@@ -10,12 +10,13 @@ Workflow (learned-gripper mode):
 3. Success: classifier detects inserted shaft + force threshold
 """
 import copy
+import glob
+import threading
 import time
 
 import gymnasium as gym
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-import requests
 
 from cr5af_env.envs.cr5af_env import CR5AFEnv, DefaultCR5AFEnvConfig
 
@@ -48,8 +49,6 @@ class MotorShaftEnv(CR5AFEnv):
         self.success = False
 
         self._update_currpos()
-        # Override pose: RT cache may lag after MovL; we know where the robot is
-        self.currpos = self.resetpos.copy()
         self._target_pos = None  # force re-init on first step of new episode
         self._servop_active = False
         obs = self._get_obs()
@@ -96,29 +95,28 @@ class MotorShaftEnv(CR5AFEnv):
         self.go_to_reset(joint_reset=False)
 
     def go_to_reset(self, joint_reset=False):
-        """Move to reset pose above hole via MovL (smooth, robot-planned)."""
+        """Move to reset pose via ServoP interpolate_move (no mode switch).
+
+        Uses ServoP throughout — no stoprobot/MovL — so _target_pos stays
+        continuous across the reset→episode boundary.
+        """
         self._post("update_param", json=self.config.PRECISION_PARAM)
         time.sleep(0.3)
 
-        # Exit ServoP mode before MovL (CR5AF requires it)
-        self._post("stoprobot")
-        time.sleep(0.1)
-
-        # Pull up to clear workpiece via MovL (blocking).
-        # Use current XYZ but reset orientation — RT cache orientation may have
-        # drifted under FC compliance (e.g. shaft stuck in hole).
+        # Pull up to clear workpiece via ServoP.
+        # Use current XYZ but reset orientation — orientation may have drifted
+        # under FC compliance (e.g. shaft stuck in hole).
         self._update_currpos()
         pull_up = self.currpos.copy()
         pull_up[3:] = self.resetpos[3:]
         pull_up[2] = self.resetpos[2] + 0.04
-        self._post("movl_wait", json={"arr": pull_up.tolist(), "v": 3}, timeout=30)
+        self.interpolate_move(pull_up, timeout=2.0)
 
         if joint_reset:
             print("JOINT RESET")
             self._post("jointreset")
             time.sleep(0.5)
 
-        # Cartesian reset
         if self.randomreset:
             reset_pose = self.resetpos.copy()
             reset_pose[:2] += np.random.uniform(
@@ -136,13 +134,10 @@ class MotorShaftEnv(CR5AFEnv):
             euler_random[-1] += np.random.uniform(-2.0, 2.0)
             reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
 
-        # Move to reset pose via MovL (blocking, smooth)
-        self._post("movl_wait", json={"arr": reset_pose.tolist(), "v": 3}, timeout=30)
+        # Move to reset pose via ServoP interpolate_move
+        self.interpolate_move(reset_pose, timeout=4.0)
 
         self._post("update_param", json=self.config.COMPLIANCE_PARAM)
-
-        # Trust MovL result rather than RT cache (which may lag)
-        self.currpos = reset_pose.copy()
 
     def compute_reward(self, obs) -> bool:
         """Reward: insertion success (pose + force threshold)."""
@@ -198,37 +193,96 @@ class GripperPenaltyWrapper(gym.Wrapper):
         return observation, reward, terminated, truncated, info
 
 
-class ServerSpacemouseIntervention(gym.ActionWrapper):
-    """Reads SpaceMouse from cr5af_server via HTTP (/get_spacemouse).
+class EvdevSpaceMouse:
+    """Reads SpaceMouse via evdev (Jetson/ARM compatible, no HID).
 
-    Drop-in replacement for SpacemouseIntervention that avoids pyspacemouse/HID
-    issues on Jetson/ARM. The SpaceMouse is read by cr5af_server via evdev and
-    exposed as an HTTP endpoint.
+    Background thread caches latest axes/buttons state.
+    Same implementation as cr5af_server.EvdevSpaceMouse, duplicated here so
+    the env can read SpaceMouse directly without HTTP round trips.
+    """
+
+    def __init__(self, device_path: str = ""):
+        import evdev
+
+        if not device_path:
+            for ev in sorted(glob.glob("/dev/input/event*")):
+                try:
+                    name = open(
+                        f"/sys/class/input/{ev.split('/')[-1]}/device/name"
+                    ).read().strip()
+                    if "SpaceMouse" in name or "Space Navigator" in name:
+                        device_path = ev
+                        break
+                except Exception:
+                    pass
+
+        self._device = None
+        self._axes = [0.0] * 6
+        self._buttons = [0, 0]
+        self._running = True
+
+        if not device_path:
+            print("WARNING: No SpaceMouse found. Action returns zeros.")
+            return
+
+        self._device = evdev.InputDevice(device_path)
+        self._thread = threading.Thread(target=self._ev_loop, daemon=True)
+        self._thread.start()
+        print(f"SpaceMouse connected: {device_path}")
+
+    def _ev_loop(self):
+        import evdev
+        try:
+            for event in self._device.read_loop():
+                if not self._running:
+                    break
+                if event.type == evdev.ecodes.EV_ABS and event.code <= 5:
+                    self._axes[event.code] = event.value / 350.0
+                elif event.type == evdev.ecodes.EV_KEY:
+                    if event.code == 256:
+                        self._buttons[0] = event.value
+                    elif event.code == 257:
+                        self._buttons[1] = event.value
+        except Exception:
+            pass
+
+    def get_state(self) -> tuple:
+        a = self._axes
+        action = [-a[1], a[0], a[2], -a[3], -a[4], -a[5]]
+        return action, self._buttons.copy()
+
+    def close(self):
+        self._running = False
+        if self._device is not None:
+            try:
+                self._device.close()
+            except Exception:
+                pass
+
+
+class ServerSpacemouseIntervention(gym.ActionWrapper):
+    """Reads SpaceMouse directly via evdev (no HTTP).
+
+    Drop-in replacement that eliminates the /get_spacemouse HTTP round trip.
+    The SpaceMouse device must not be opened by cr5af_server — start server
+    with --no_spacemouse when using this wrapper.
     """
 
     def __init__(self, env, server_url="http://127.0.0.1:5000/"):
         super().__init__(env)
-        self.server_url = server_url
         self.gripper_enabled = self.action_space.shape == (7,)
         self.left = False
         self.right = False
-        self._req_session = requests.Session()
-        self._req_session.trust_env = False
+        self._sm = EvdevSpaceMouse()
         self._zero_offset: np.ndarray | None = None
         self._calibrate_zero()
 
     def _calibrate_zero(self, samples: int = 30):
-        """Sample SpaceMouse at rest to get zero offset."""
-        print("Calibrating SpaceMouse zero offset via /get_spacemouse...")
+        print("Calibrating SpaceMouse zero offset via evdev...")
         vals = []
         for _ in range(samples):
-            try:
-                resp = self._req_session.post(
-                    self.server_url + "get_spacemouse", timeout=2.0,
-                ).json()
-                vals.append(np.array(resp["action"], dtype=np.float32))
-            except Exception:
-                pass
+            action, _ = self._sm.get_state()
+            vals.append(np.array(action, dtype=np.float32))
             time.sleep(0.02)
         if vals:
             self._zero_offset = np.median(vals, axis=0)
@@ -240,45 +294,30 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
     _step_count: int = 0
 
     def action(self, action: np.ndarray) -> tuple[np.ndarray, bool]:
-        try:
-            resp = self._req_session.post(
-                self.server_url + "get_spacemouse", timeout=1.0,
-            ).json()
-            expert_a = np.array(resp["action"], dtype=np.float32)
-            buttons = resp["buttons"]
-        except Exception as e:
-            if np.random.random() < 0.05:
-                print(f"[SpaceMouse] /get_spacemouse failed: {e}")
-            return action, False
+        raw_action, buttons = self._sm.get_state()
+        expert_a = np.array(raw_action, dtype=np.float32)
 
         if self._zero_offset is not None:
             expert_a[:6] -= self._zero_offset
 
         self.left, self.right = buttons[0], buttons[1]
-        intervened = False
 
-        # Deadman switch: hold left button to enable motion (same as teleop)
+        # Deadman switch: hold left button to enable motion
         if not self.left:
             return action, False
 
-        # Per-axis dead zone (match teleop_cr5af.py threshold of 0.15)
+        # Per-axis dead zone
         if np.max(np.abs(expert_a[:6])) < 0.15:
             return action, False
 
-        intervened = True
-
         if self.gripper_enabled:
             if self.right:
-                # Right button: open gripper
                 gripper_action = np.array([1.0], dtype=np.float32)
-                intervened = True
             else:
                 gripper_action = np.zeros((1,), dtype=np.float32)
             expert_a = np.concatenate((expert_a, gripper_action))
 
-        if intervened:
-            return expert_a, True
-        return action, False
+        return expert_a, True
 
     def step(self, action):
         new_action, replaced = self.action(action)
