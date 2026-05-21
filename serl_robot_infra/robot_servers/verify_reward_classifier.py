@@ -80,6 +80,7 @@ def preprocess(rgb: np.ndarray) -> dict:
     """Crop + resize to match training pipeline, return observation dict."""
     cropped = IMAGE_CROP(rgb)
     resized = cv2.resize(cropped, (128, 128))
+    resized = resized[..., ::-1]  # BGR → RGB (training data stored RGB)
     return {
         IMAGE_KEY: resized[np.newaxis, ...].astype(np.uint8),
         "state": np.zeros((1, 19), dtype=np.float32),

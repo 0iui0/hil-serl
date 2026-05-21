@@ -15,9 +15,9 @@ for _name in ('tree_leaves', 'tree_map', 'tree_flatten', 'tree_unflatten',
 try:
     from jax._src.core import ShapedArray as _SA
     _orig_update = _SA.update
-    def _patched_update(self, **kwargs):
+    def _patched_update(self, *args, **kwargs):
         kwargs.pop("named_shape", None)
-        return _orig_update(self, **kwargs)
+        return _orig_update(self, *args, **kwargs)
     _SA.update = _patched_update
 except Exception:
     pass
@@ -48,7 +48,8 @@ def main(_):
     env = config.get_environment(fake_env=True, save_video=False, classifier=False)
 
     devices = jax.local_devices()
-    sharding = jax.sharding.PositionalSharding(devices)
+    mesh = jax.sharding.Mesh(devices, ("devices",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
     
     # Create buffer for positive transitions
     pos_buffer = ReplayBuffer(
@@ -72,7 +73,7 @@ def main(_):
         sample_args={
             "batch_size": FLAGS.batch_size // 2,
         },
-        device=sharding.replicate(),
+        device=sharding,
     )
     
     # Create buffer for negative transitions
@@ -98,7 +99,7 @@ def main(_):
         sample_args={
             "batch_size": FLAGS.batch_size // 2,
         },
-        device=sharding.replicate(),
+        device=sharding,
     )
 
     print(f"failed buffer size: {len(neg_buffer)}")
