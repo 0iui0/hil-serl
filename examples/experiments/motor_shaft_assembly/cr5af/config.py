@@ -120,10 +120,16 @@ class TrainConfig(DefaultTrainingConfig):
                 sigmoid = lambda x: 1 / (1 + jnp.exp(-x))
                 # State layout: tcp_pose(6) + tcp_vel(6) + tcp_force(3) + tcp_torque(3) + gripper_pose(1)
                 # tcp_force indices: [12]=fx, [13]=fy, [14]=fz
-                return int(
-                    float(sigmoid(classifier(obs))[0]) > 0.85
-                    and float(jnp.abs(obs['state'][0, 14])) > env_config.FORCE_THRESHOLD
-                )
+                cls_score = float(sigmoid(classifier(obs))[0])
+                fz = float(jnp.abs(obs['state'][0, 14]))
+                fx = float(obs['state'][0, 12])
+                fy = float(obs['state'][0, 13])
+                result = int(cls_score > 0.85 and fz > env_config.FORCE_THRESHOLD)
+                if result:
+                    print(f"[REWARD] SUCCESS cls={cls_score:.3f} fx={fx:.2f} fy={fy:.2f} fz={fz:.2f}N")
+                elif cls_score > 0.5 or fz > 0.3:
+                    print(f"[REWARD] NO    cls={cls_score:.3f} fx={fx:.2f} fy={fy:.2f} fz={fz:.2f}N thresh={env_config.FORCE_THRESHOLD}")
+                return result
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
 
