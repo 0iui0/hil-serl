@@ -125,10 +125,12 @@ class TrainConfig(DefaultTrainingConfig):
                 fx = float(obs['state'][0, 12])
                 fy = float(obs['state'][0, 13])
                 result = int(cls_score > 0.85 and fz > env_config.FORCE_THRESHOLD)
-                if result:
-                    print(f"[REWARD] SUCCESS cls={cls_score:.3f} fx={fx:.2f} fy={fy:.2f} fz={fz:.2f}N")
-                elif cls_score > 0.5 or fz > 0.3:
-                    print(f"[REWARD] NO    cls={cls_score:.3f} fx={fx:.2f} fy={fy:.2f} fz={fz:.2f}N thresh={env_config.FORCE_THRESHOLD}")
+                if not hasattr(reward_func, '_counter'):
+                    reward_func._counter = 0
+                reward_func._counter += 1
+                if result or cls_score > 0.3 or fz > 0.1 or reward_func._counter % 25 == 0:
+                    tag = "HIT" if result else ("--" if cls_score < 0.3 and fz <= 0.1 else "  ")
+                    print(f"[REWARD {reward_func._counter:04d}] {tag} cls={cls_score:.3f} fx={fx:.2f} fy={fy:.2f} fz={fz:.2f}N thresh={env_config.FORCE_THRESHOLD}")
                 return result
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
