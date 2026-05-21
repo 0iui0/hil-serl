@@ -474,9 +474,14 @@ class CR5AFEnv(gym.Env):
         sf = ps.get("six_force")
         if sf is not None:
             sf = np.array(sf)
-            if sf.shape == (6,):
+            if sf.shape == (6,) and np.any(np.abs(sf) > 0.01):
                 self.currforce = sf[:3]
                 self.currtorque = sf[3:6]
+
+        sf_online = ps.get("six_force_online")
+        if sf_online is not None and not hasattr(self, '_sf_online_printed'):
+            self._sf_online_printed = True
+            print(f"SixForceOnline: {sf_online}")
 
         return ps
 

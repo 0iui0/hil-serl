@@ -134,6 +134,7 @@ RT_TOOL_VECTOR = 624
 RT_TCP_SPEED = 672
 RT_TCP_FORCE = 720
 RT_SIX_FORCE = 1304
+RT_SIX_FORCE_ONLINE = 1037
 RT_ACTUAL_QUAT = 1384
 RT_CURRENT_COMMAND_ID = 1112
 
@@ -175,6 +176,7 @@ def _parse_rt_data(data: bytes) -> dict | None:
         "tcp_speed": _doubles(RT_TCP_SPEED),
         "tcp_force": _doubles(RT_TCP_FORCE),
         "six_force": _doubles(RT_SIX_FORCE),
+        "six_force_online": bool(struct.unpack_from("<B", data, RT_SIX_FORCE_ONLINE)[0]),
         "actual_quat": _doubles(RT_ACTUAL_QUAT, 4),
         "current_command_id": struct.unpack_from("<Q", data, RT_CURRENT_COMMAND_ID)[0],
     }
@@ -209,6 +211,7 @@ class CR5AFServer:
         self.robot_mode = 0
         self.current_command_id = 0
         self.six_force = np.zeros(6)
+        self.six_force_online = False
         self._connected = False
 
         # Connect to real-time data feed
@@ -297,6 +300,7 @@ class CR5AFServer:
                 self.current_command_id = rt["current_command_id"]
 
                 self.six_force = np.array(rt["six_force"])
+                self.six_force_online = rt["six_force_online"]
 
     # ── Persistent command socket (port 29999) ──────────────────────────────
 
@@ -404,8 +408,19 @@ class CR5AFServer:
         except Exception as e:
             print(f"Warning: EnableRobot failed: {e}")
 
+        # Enable 6-axis force-torque sensor
+        try:
+            self.enable_ft_sensor(1)
+        except Exception as e:
+            print(f"Warning: EnableFTSensor failed: {e}")
+
     def six_force_home(self):
         self._send_cmd("SixForceHome()")
+
+    def enable_ft_sensor(self, status: int = 1):
+        resp = self._send_cmd(f"EnableFTSensor({status})")
+        print(f"EnableFTSensor({status}): {resp}")
+        return resp
 
     def disable_robot(self):
         self._send_cmd("DisableRobot()")
@@ -696,6 +711,7 @@ def main(argv):
             "robot_mode": server.robot_mode,
             "current_command_id": server.current_command_id,
             "six_force": server.six_force.tolist(),
+            "six_force_online": server.six_force_online,
         })
 
     @webapp.route("/getpos", methods=["POST"])
@@ -918,6 +934,15 @@ def main(argv):
             return err
         resp = server.six_force_home()
         return jsonify({"six_force_home": resp})
+
+    @webapp.route("/enable_ft_sensor", methods=["POST"])
+    def enable_ft_sensor():
+        err = _require_not_safe()
+        if err:
+            return err
+        status = request.json.get("status", 1) if request.json else 1
+        resp = server.enable_ft_sensor(status)
+        return jsonify({"enable_ft_sensor": resp})
 
     @webapp.route("/get_force_sensor", methods=["POST"])
     def get_force_sensor():
