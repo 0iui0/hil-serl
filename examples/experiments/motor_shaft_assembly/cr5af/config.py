@@ -59,7 +59,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     # Gripper mode switch
     USE_GRIPPER = False                 # False = fixed-flange (current), True = learned-gripper (future)
     GRASP_FORCE_THRESHOLD = 2.0         # N, minimum force to confirm grasp
-    FORCE_THRESHOLD = 2.0              # N, |fz| threshold for insertion success
+    FORCE_THRESHOLD = 1.0              # N, |fz| threshold for insertion success
 
     # FC impedance params (CR5AF FC mode stiffness/damping)
     # Higher damping prevents oscillation; moderate stiffness tracks SpaceMouse crisply
