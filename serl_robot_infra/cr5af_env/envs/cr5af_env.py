@@ -412,6 +412,7 @@ class CR5AFEnv(gym.Env):
         self.curr_path_length = 0
 
         self._update_currpos()
+        self._zero_force_sensor()
         self._target_pos = None  # force re-init on first step of new episode
         self._servop_active = False
         obs = self._get_obs()
@@ -477,6 +478,7 @@ class CR5AFEnv(gym.Env):
             if sf.shape == (6,) and np.any(sf != 0):
                 self.currforce = sf[:3]
                 self.currtorque = sf[3:6]
+
         return ps
 
     def _send_gripper_command(self, pos: float, mode="binary"):
@@ -500,6 +502,15 @@ class CR5AFEnv(gym.Env):
             self._req_session = requests.Session()
             self._req_session.trust_env = False
         return self._req_session.post(self.url + endpoint, **kwargs)
+
+    def _zero_force_sensor(self):
+        """Zero the six-axis force sensor via Dobot's SixForceHome()."""
+        if self.fake_env:
+            return
+        try:
+            self._post("force_home", timeout=5)
+        except Exception as e:
+            print(f"WARNING: force_home failed: {e}")
 
     def _update_currpos(self):
         if self.fake_env:

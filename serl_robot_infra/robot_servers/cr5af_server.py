@@ -404,6 +404,9 @@ class CR5AFServer:
         except Exception as e:
             print(f"Warning: EnableRobot failed: {e}")
 
+    def six_force_home(self):
+        self._send_cmd("SixForceHome()")
+
     def disable_robot(self):
         self._send_cmd("DisableRobot()")
 

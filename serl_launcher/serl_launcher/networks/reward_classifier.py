@@ -1,6 +1,23 @@
 import pickle as pkl
 import jax
 from jax import numpy as jnp
+
+# JAX 0.6+ compatibility
+for _name in ('tree_leaves', 'tree_map', 'tree_flatten', 'tree_unflatten',
+              'tree_structure', 'tree_transpose'):
+    if not hasattr(jax, _name):
+        setattr(jax, _name, getattr(jax.tree_util, _name))
+
+try:
+    from jax._src.core import ShapedArray as _SA
+    _orig_update = _SA.update
+    def _patched_update(self, *args, **kwargs):
+        kwargs.pop("named_shape", None)
+        return _orig_update(self, *args, **kwargs)
+    _SA.update = _patched_update
+except Exception:
+    pass
+
 import flax.linen as nn
 from flax.training.train_state import TrainState
 from flax.training import checkpoints

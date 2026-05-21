@@ -117,10 +117,12 @@ class TrainConfig(DefaultTrainingConfig):
 
             def reward_func(obs):
                 sigmoid = lambda x: 1 / (1 + jnp.exp(-x))
-                # Z-force contact check: insertion produces resistance along Z axis
                 # State layout: tcp_pose(6) + tcp_vel(6) + tcp_force(3) + tcp_torque(3) + gripper_pose(1)
                 # tcp_force indices: [12]=fx, [13]=fy, [14]=fz
-                return int(sigmoid(classifier(obs)) > 0.85 and jnp.abs(obs['state'][0, 14]) > 2.0)
+                return int(
+                    float(sigmoid(classifier(obs))[0]) > 0.85
+                    and float(jnp.abs(obs['state'][0, 14])) > 2.0
+                )
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
 

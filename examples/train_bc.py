@@ -41,7 +41,8 @@ flags.DEFINE_boolean(
 
 devices = jax.local_devices()
 num_devices = len(devices)
-sharding = jax.sharding.PositionalSharding(devices)
+mesh = jax.sharding.Mesh(devices, ("devices",))
+sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
 
 def print_green(x):
@@ -103,7 +104,7 @@ def train(
             "batch_size": config.batch_size,
             "pack_obs_and_next_obs": False,
         },
-        device=sharding.replicate(),
+        device=sharding,
     )
     
     # Pretrain BC policy to get started
@@ -150,7 +151,7 @@ def main(_):
     # replicate agent across devices
     # need the jnp.array to avoid a bug where device_put doesn't recognize primitives
     bc_agent: BCAgent = jax.device_put(
-        jax.tree_map(jnp.array, bc_agent), sharding.replicate()
+        jax.tree_map(jnp.array, bc_agent), sharding
     )
 
     if not eval_mode:
@@ -195,7 +196,7 @@ def main(_):
 
     else:
         rng = jax.random.PRNGKey(FLAGS.seed)
-        sampling_rng = jax.device_put(rng, sharding.replicate())
+        sampling_rng = jax.device_put(rng, sharding)
 
         bc_ckpt = checkpoints.restore_checkpoint(
             FLAGS.bc_checkpoint_path,
