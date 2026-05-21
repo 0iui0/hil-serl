@@ -18,7 +18,9 @@ def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     if FLAGS.force_threshold is not None:
-        config.EnvConfig.FORCE_THRESHOLD = FLAGS.force_threshold
+        import sys
+        module = sys.modules[config.__class__.__module__]
+        module.EnvConfig.FORCE_THRESHOLD = FLAGS.force_threshold
         print(f"Force threshold set to {FLAGS.force_threshold} N")
     env = config.get_environment(fake_env=False, save_video=False, classifier=True)
     
