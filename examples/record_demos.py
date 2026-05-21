@@ -13,15 +13,20 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("successes_needed", 20, "Number of successful demos to collect.")
 flags.DEFINE_float("force_threshold", None, "Override |fz| threshold for insertion success (N).")
+flags.DEFINE_float("classifier_threshold", None, "Override classifier sigmoid threshold.")
 
 def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
-    if FLAGS.force_threshold is not None:
+    if FLAGS.force_threshold is not None or FLAGS.classifier_threshold is not None:
         import sys
         module = sys.modules[config.__class__.__module__]
-        module.EnvConfig.FORCE_THRESHOLD = FLAGS.force_threshold
-        print(f"Force threshold set to {FLAGS.force_threshold} N")
+        if FLAGS.force_threshold is not None:
+            module.EnvConfig.FORCE_THRESHOLD = FLAGS.force_threshold
+            print(f"Force threshold set to {FLAGS.force_threshold} N")
+        if FLAGS.classifier_threshold is not None:
+            module.EnvConfig.CLASSIFIER_THRESHOLD = FLAGS.classifier_threshold
+            print(f"Classifier threshold set to {FLAGS.classifier_threshold}")
     env = config.get_environment(fake_env=False, save_video=False, classifier=True)
     
     obs, info = env.reset()

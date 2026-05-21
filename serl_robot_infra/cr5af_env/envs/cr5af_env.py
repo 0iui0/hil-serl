@@ -475,7 +475,7 @@ class CR5AFEnv(gym.Env):
         sf = ps.get("six_force")
         if sf is not None:
             sf = np.array(sf)
-            if sf.shape == (6,) and np.any(sf != 0):
+            if sf.shape == (6,):
                 self.currforce = sf[:3]
                 self.currtorque = sf[3:6]
 
@@ -540,7 +540,7 @@ class CR5AFEnv(gym.Env):
         six_force = ps.get("six_force")
         if six_force is not None:
             sf = np.array(six_force)
-            if sf.shape == (6,) and np.any(sf != 0):
+            if sf.shape == (6,):
                 self.currforce = sf[:3]
                 self.currtorque = sf[3:6]
 

@@ -60,6 +60,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     USE_GRIPPER = False                 # False = fixed-flange (current), True = learned-gripper (future)
     GRASP_FORCE_THRESHOLD = 2.0         # N, minimum force to confirm grasp
     FORCE_THRESHOLD = 1.0              # N, |fz| threshold for insertion success
+    CLASSIFIER_THRESHOLD = 0.5         # sigmoid score threshold for insertion detection
 
     # FC impedance params (CR5AF FC mode stiffness/damping)
     # Higher damping prevents oscillation; moderate stiffness tracks SpaceMouse crisply
@@ -124,7 +125,7 @@ class TrainConfig(DefaultTrainingConfig):
                 fz = float(jnp.abs(obs['state'][0, 14]))
                 fx = float(obs['state'][0, 12])
                 fy = float(obs['state'][0, 13])
-                result = int(cls_score > 0.85 and fz > env_config.FORCE_THRESHOLD)
+                result = int(cls_score > env_config.CLASSIFIER_THRESHOLD and fz > env_config.FORCE_THRESHOLD)
                 if not hasattr(reward_func, '_counter'):
                     reward_func._counter = 0
                 reward_func._counter += 1
