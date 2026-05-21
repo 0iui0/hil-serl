@@ -119,19 +119,14 @@ class TrainConfig(DefaultTrainingConfig):
 
             def reward_func(obs):
                 sigmoid = lambda x: 1 / (1 + jnp.exp(-x))
-                # State layout: tcp_pose(6) + tcp_vel(6) + tcp_force(3) + tcp_torque(3) + gripper_pose(1)
-                # tcp_force indices: [12]=fx, [13]=fy, [14]=fz
                 cls_score = float(sigmoid(classifier(obs))[0])
-                fz = float(jnp.abs(obs['state'][0, 14]))
-                fx = float(obs['state'][0, 12])
-                fy = float(obs['state'][0, 13])
-                result = int(cls_score > env_config.CLASSIFIER_THRESHOLD and fz > env_config.FORCE_THRESHOLD)
+                result = int(cls_score > env_config.CLASSIFIER_THRESHOLD)
                 if not hasattr(reward_func, '_counter'):
                     reward_func._counter = 0
                 reward_func._counter += 1
-                if result or cls_score > 0.3 or fz > 0.1 or reward_func._counter % 25 == 0:
-                    tag = "HIT" if result else ("--" if cls_score < 0.3 and fz <= 0.1 else "  ")
-                    print(f"[REWARD {reward_func._counter:04d}] {tag} cls={cls_score:.3f} fx={fx:.2f} fy={fy:.2f} fz={fz:.2f}N thresh={env_config.FORCE_THRESHOLD}")
+                if result or cls_score > 0.3 or reward_func._counter % 25 == 0:
+                    tag = "HIT" if result else "  "
+                    print(f"[REWARD {reward_func._counter:04d}] {tag} cls={cls_score:.3f}")
                 return result
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)

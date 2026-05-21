@@ -412,7 +412,6 @@ class CR5AFEnv(gym.Env):
         self.curr_path_length = 0
 
         self._update_currpos()
-        self._zero_force_sensor()
         self._target_pos = None  # force re-init on first step of new episode
         self._servop_active = False
         obs = self._get_obs()

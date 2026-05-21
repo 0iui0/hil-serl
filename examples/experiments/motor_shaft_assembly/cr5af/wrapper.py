@@ -49,7 +49,6 @@ class MotorShaftEnv(CR5AFEnv):
         self.success = False
 
         self._update_currpos()
-        self._zero_force_sensor()
         self._target_pos = None  # force re-init on first step of new episode
         self._servop_active = False
         obs = self._get_obs()
