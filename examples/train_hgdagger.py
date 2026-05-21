@@ -12,7 +12,7 @@ import os
 import copy
 import glob
 import pickle as pkl
-from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
+from gymnasium.wrappers import RecordEpisodeStatistics
 from pynput import keyboard
 
 from serl_launcher.agents.continuous.bc import BCAgent
@@ -382,14 +382,15 @@ def main(_):
 
         assert FLAGS.demo_path is not None or FLAGS.demo_buffer_path is not None
 
-        for file in glob.glob(os.path.join(FLAGS.demo_buffer_path, "*.pkl")):
-            with open(file, "rb") as f:
-                transitions = pkl.load(f)
-                for transition in transitions:
-                    demo_buffer.insert(transition)
-        print_green(
-            f"Loaded previous demo buffer data. Demo buffer size: {len(demo_buffer)}"
-        )
+        if FLAGS.demo_buffer_path is not None:
+            for file in glob.glob(os.path.join(FLAGS.demo_buffer_path, "*.pkl")):
+                with open(file, "rb") as f:
+                    transitions = pkl.load(f)
+                    for transition in transitions:
+                        demo_buffer.insert(transition)
+            print_green(
+                f"Loaded previous demo buffer data. Demo buffer size: {len(demo_buffer)}"
+            )
         for path in FLAGS.demo_path:
             with open(path, "rb") as f:
                 transitions = pkl.load(f)
