@@ -12,10 +12,14 @@ from experiments.mappings import CONFIG_MAPPING
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("successes_needed", 20, "Number of successful demos to collect.")
+flags.DEFINE_float("force_threshold", None, "Override |fz| threshold for insertion success (N).")
 
 def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
+    if FLAGS.force_threshold is not None:
+        config.EnvConfig.FORCE_THRESHOLD = FLAGS.force_threshold
+        print(f"Force threshold set to {FLAGS.force_threshold} N")
     env = config.get_environment(fake_env=False, save_video=False, classifier=True)
     
     obs, info = env.reset()
