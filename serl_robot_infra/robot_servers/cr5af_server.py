@@ -789,6 +789,7 @@ def main(argv):
                 "dq": server.dq.tolist(),
                 "gripper_pos": server.gripper_pos,
                 "six_force": server.six_force.tolist(),
+                "six_force_online": server.six_force_online,
             })
 
     @webapp.route("/stoprobot", methods=["POST"])

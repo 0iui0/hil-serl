@@ -11,7 +11,7 @@ from flax.training import checkpoints
 import os
 import copy
 import pickle as pkl
-from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
+from gymnasium.wrappers import RecordEpisodeStatistics
 from natsort import natsorted
 
 from serl_launcher.agents.continuous.sac import SACAgent
@@ -54,7 +54,13 @@ flags.DEFINE_boolean(
 
 devices = jax.local_devices()
 num_devices = len(devices)
-sharding = jax.sharding.PositionalSharding(devices)
+try:
+    sharding = jax.sharding.PositionalSharding(devices)
+except AttributeError:
+    class _SingleDeviceWrapper:
+        def replicate(self):
+            return jax.devices()[0]
+    sharding = _SingleDeviceWrapper()
 
 
 def print_green(x):
@@ -267,6 +273,10 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
     server.register_data_store("actor_env_intvn", demo_buffer)
     server.start(threaded=True)
 
+    # send the initial network to the actor BEFORE waiting for buffer
+    server.publish_network(agent.state.params)
+    print_green("sent initial network to actor")
+
     # Loop to wait until replay_buffer is filled
     pbar = tqdm.tqdm(
         total=config.training_starts,
@@ -280,10 +290,6 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
         time.sleep(1)
     pbar.update(len(replay_buffer) - pbar.n)  # Update progress bar
     pbar.close()
-
-    # send the initial network to the actor
-    server.publish_network(agent.state.params)
-    print_green("sent initial network to actor")
 
     # 50/50 sampling from RLPD, half from demo and half from online experience
     replay_iterator = replay_buffer.get_iterator(

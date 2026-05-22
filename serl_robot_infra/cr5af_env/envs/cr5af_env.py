@@ -409,6 +409,7 @@ class CR5AFEnv(gym.Env):
         self._recover()
         self.go_to_reset(joint_reset=joint_reset)
         self._recover()
+        self._zero_force_sensor()
         self.curr_path_length = 0
 
         self._update_currpos()
@@ -474,7 +475,7 @@ class CR5AFEnv(gym.Env):
         sf = ps.get("six_force")
         if sf is not None:
             sf = np.array(sf)
-            if sf.shape == (6,) and np.any(np.abs(sf) > 0.01):
+            if sf.shape == (6,):
                 self.currforce = sf[:3]
                 self.currtorque = sf[3:6]
 
