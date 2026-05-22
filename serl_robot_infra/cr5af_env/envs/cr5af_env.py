@@ -50,7 +50,14 @@ class ImageDisplayer(threading.Thread):
                     continue
                 full = img_array.get(k + "_full", v)
                 panels.append(full)
-            frame = np.concatenate(panels, axis=1)
+            max_h = max(p.shape[0] for p in panels)
+            padded = []
+            for p in panels:
+                if p.shape[0] < max_h:
+                    pad = np.zeros((max_h - p.shape[0], p.shape[1], 3), dtype=p.dtype)
+                    p = np.concatenate([p, pad], axis=0)
+                padded.append(p)
+            frame = np.concatenate(padded, axis=1)
             cv2.imshow(self.name, frame)
             if first:
                 cv2.resizeWindow(self.name, frame.shape[1], frame.shape[0])
@@ -380,10 +387,6 @@ class CR5AFEnv(gym.Env):
             reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
         else:
             reset_pose = self.resetpos.copy()
-            reset_pose[:2] += np.random.uniform(-0.05, 0.05, (2,))
-            euler_random = self._RESET_POSE[3:].copy()
-            euler_random[-1] += np.random.uniform(-2.0, 2.0)
-            reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
 
         # Move to reset pose via ServoP interpolate_move
         self.interpolate_move(reset_pose, timeout=4.0)
