@@ -450,7 +450,7 @@ def main(_):
         )
         # set up wandb and logging
         wandb_logger = make_wandb_logger(
-            project="hil-serl",
+            project="xx",
             description=FLAGS.exp_name,
             debug=FLAGS.debug,
         )

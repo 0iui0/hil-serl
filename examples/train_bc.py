@@ -10,7 +10,7 @@ from absl import app, flags
 from flax.training import checkpoints
 import os
 import pickle as pkl
-from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
+from gymnasium.wrappers import RecordEpisodeStatistics
 
 from serl_launcher.agents.continuous.bc import BCAgent
 
@@ -136,7 +136,7 @@ def main(_):
     env = config.get_environment(
         fake_env=not eval_mode,
         save_video=FLAGS.save_video,
-        classifier=True,
+        classifier=eval_mode,
     )
     env = RecordEpisodeStatistics(env)
 
@@ -168,7 +168,7 @@ def main(_):
 
         # set up wandb and logging
         wandb_logger = make_wandb_logger(
-            project="hil-serl",
+            project="xx",
             description=FLAGS.exp_name,
             debug=FLAGS.debug,
         )
