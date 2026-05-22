@@ -28,20 +28,20 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     REALSENSE_CAMERAS = {
         "external": {
             "serial_number": "333422302713",  # D455 #1 on Jetson Thor
-            "dim": (320, 240),
+            "dim": (640, 480),
             "exposure": 40000,
-            "fps": 10,
+            "fps": 30,
         },
         "wrist": {
             "serial_number": "246322300995",  # D455 #2 (new)
-            "dim": (320, 240),
+            "dim": (640, 480),
             "exposure": 40000,
-            "fps": 10,
+            "fps": 30,
         },
     }
     IMAGE_CROP = {
-        "external": lambda img: img[61:221, 103:251],
-        "wrist": lambda img: img[48:184, 58:200],
+        "external": lambda img: img[158:418, 234:500],
+        "wrist": lambda img: img[111:364, 101:387],
     }
 
     # Calibrated 2025-05-18 with CR5AF
@@ -59,7 +59,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     RANDOM_RZ_RANGE = 0.05
     DISPLAY_IMAGE = True
     MAX_EPISODE_LENGTH = 200            # 8s at 25Hz (aligned with Franka ~6-10s)
-    # Per-step delta caps (25Hz × 3mm = 75mm/s; 6mm caused axis-3 power limit)
+    # Per-step delta caps for RL safety (25Hz × 3mm = 75mm/s)
     MAX_TRANSLATION_DELTA_MM = 3.0
     MAX_ROTATION_DELTA_DEG = 3.0
     MIN_DELTA_MM = 0.05                 # lower threshold for more responsive fine control
@@ -96,7 +96,7 @@ class TrainConfig(DefaultTrainingConfig):
     policy_network_kwargs = {"hidden_dims": [512, 512, 512]}
     gripper_penalty = -0.05
 
-    def get_environment(self, fake_env=False, save_video=False, classifier=False, server_url=None):
+    def get_environment(self, fake_env=False, save_video=False, classifier=False, server_url=None, server_teleop=False):
         env_config = EnvConfig()
         if server_url is not None:
             env_config.SERVER_URL = server_url
@@ -111,7 +111,7 @@ class TrainConfig(DefaultTrainingConfig):
         if not EnvConfig.USE_GRIPPER:
             env = GripperCloseEnv(env)
 
-        if not fake_env:
+        if not fake_env and not server_teleop:
             env = ServerSpacemouseIntervention(env, server_url=env_config.SERVER_URL)
 
         env = RelativeFrame(env)

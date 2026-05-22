@@ -624,9 +624,9 @@ class CR5AFServer:
                     -dx * self._teleop_action_scale,
                     -dy * self._teleop_action_scale,
                     -dz * self._teleop_action_scale,
-                    dpitch * self._teleop_rot_scale,
-                    droll * self._teleop_rot_scale,
-                    dyaw * self._teleop_rot_scale,
+                    -dpitch * self._teleop_rot_scale,
+                    -droll * self._teleop_rot_scale,
+                    -dyaw * self._teleop_rot_scale,
                 ])
 
                 if np.max(np.abs(delta)) < self._teleop_delta_threshold:

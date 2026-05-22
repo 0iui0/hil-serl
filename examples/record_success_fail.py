@@ -45,7 +45,8 @@ def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=False, save_video=False,
-                                 classifier=False, server_url=FLAGS.server_url)
+                                 classifier=False, server_url=FLAGS.server_url,
+                                 server_teleop=True)
 
     obs, _ = env.reset()
     successes = []

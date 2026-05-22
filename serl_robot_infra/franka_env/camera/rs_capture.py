@@ -1,3 +1,6 @@
+import threading
+import time
+
 import numpy as np
 import pyrealsense2 as rs  # Intel RealSense cross-platform open-source API
 
@@ -22,42 +25,56 @@ class RSCapture:
         self.s = self.profile.get_device().query_sensors()[0]
         self.s.set_option(rs.option.exposure, exposure)
 
-        # Warm up: wait for first frame to confirm pipeline is live
-        for _ in range(3):
-            try:
-                self.pipe.wait_for_frames(timeout_ms=10000)
-                break
-            except RuntimeError:
-                pass
-
         # Create an align object
-        # rs.align allows us to perform alignment of depth frames to others frames
-        # The "align_to" is the stream type to which we plan to align depth frames.
         align_to = rs.stream.color
         self.align = rs.align(align_to)
 
-    def read(self):
-        for attempt in range(3):
+        # Background thread for non-blocking reads
+        self._latest_frame = None
+        self._latest_depth = None
+        self._frame_ready = threading.Event()
+        self._running = True
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+        self._thread.start()
+
+        # Wait for first frame
+        if not self._frame_ready.wait(timeout=10.0):
+            print(f"[RSCapture {self.name}] WARNING: no frame received within 10s")
+
+    def _capture_loop(self):
+        """Background thread: continuously read frames and cache the latest."""
+        while self._running:
             try:
                 frames = self.pipe.wait_for_frames(timeout_ms=5000)
                 aligned_frames = self.align.process(frames)
                 color_frame = aligned_frames.get_color_frame()
-                if self.depth:
-                    depth_frame = aligned_frames.get_depth_frame()
 
                 if color_frame and color_frame.is_video_frame():
                     image = np.asarray(color_frame.get_data())
-                    if self.depth and depth_frame and depth_frame.is_depth_frame():
-                        depth = np.expand_dims(np.asarray(depth_frame.get_data()), axis=2)
-                        return True, np.concatenate((image, depth), axis=-1)
-                    else:
-                        return True, image
-                else:
-                    print(f"[RSCapture {self.name}] attempt {attempt}: bad frame, retrying...")
-            except RuntimeError as e:
-                print(f"[RSCapture {self.name}] attempt {attempt}: timeout ({e}), retrying...")
-        return False, None
+                    self._latest_frame = image
+                    if self.depth:
+                        depth_frame = aligned_frames.get_depth_frame()
+                        if depth_frame and depth_frame.is_depth_frame():
+                            self._latest_depth = np.expand_dims(
+                                np.asarray(depth_frame.get_data()), axis=2
+                            )
+                    self._frame_ready.set()
+            except RuntimeError:
+                pass
+            except Exception:
+                time.sleep(0.001)
+
+    def read(self):
+        """Return latest cached frame (non-blocking)."""
+        if self._latest_frame is None:
+            return False, None
+        if self.depth and self._latest_depth is not None:
+            return True, np.concatenate((self._latest_frame.copy(), self._latest_depth), axis=-1)
+        return True, self._latest_frame.copy()
 
     def close(self):
+        self._running = False
+        if hasattr(self, '_thread') and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         self.pipe.stop()
         self.cfg.disable_all_streams()

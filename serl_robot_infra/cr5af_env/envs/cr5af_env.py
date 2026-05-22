@@ -235,7 +235,7 @@ class CR5AFEnv(gym.Env):
             dx, dy, dz, droll, dpitch, dyaw = action[:6]
             xyz_delta_m = np.array([
                 -dx * self.action_scale[0],
-                 dy * self.action_scale[0],
+                -dy * self.action_scale[0],
                 -dz * self.action_scale[0],
             ])
             rot_delta = np.array([dpitch, droll, dyaw]) * self.action_scale[1]
