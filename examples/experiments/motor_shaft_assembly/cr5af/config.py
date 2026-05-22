@@ -28,20 +28,20 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     REALSENSE_CAMERAS = {
         "external": {
             "serial_number": "333422302713",  # D455 #1 on Jetson Thor
-            "dim": (640, 480),
+            "dim": (320, 240),
             "exposure": 40000,
             "fps": 10,
         },
         "wrist": {
             "serial_number": "246322300995",  # D455 #2 (new)
-            "dim": (640, 480),
+            "dim": (320, 240),
             "exposure": 40000,
             "fps": 10,
         },
     }
     IMAGE_CROP = {
-        "external": lambda img: img[122:442, 206:502],
-        "wrist": lambda img: img[97:368, 115:399],
+        "external": lambda img: img[61:221, 103:251],
+        "wrist": lambda img: img[48:184, 58:200],
     }
 
     # Calibrated 2025-05-18 with CR5AF

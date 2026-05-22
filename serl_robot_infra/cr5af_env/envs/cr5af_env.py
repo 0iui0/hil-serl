@@ -50,6 +50,8 @@ class ImageDisplayer(threading.Thread):
                     continue
                 full = img_array.get(k + "_full", v)
                 panels.append(full)
+            if not panels:
+                continue
             max_h = max(p.shape[0] for p in panels)
             padded = []
             for p in panels:
