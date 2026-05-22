@@ -30,11 +30,13 @@ class EnvConfig(DefaultCR5AFEnvConfig):
             "serial_number": "333422302713",  # D455 #1 on Jetson Thor
             "dim": (640, 480),
             "exposure": 40000,
+            "fps": 10,
         },
         "wrist": {
             "serial_number": "246322300995",  # D455 #2 (new)
             "dim": (640, 480),
             "exposure": 40000,
+            "fps": 10,
         },
     }
     IMAGE_CROP = {
