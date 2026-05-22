@@ -242,7 +242,9 @@ class HidrawSpaceMouse:
             time.sleep(0.001)
 
     def get_state(self) -> tuple:
-        return self._axes[:], self._buttons[:]
+        a = self._axes  # [x, y, z, pitch, roll, yaw]
+        action = [a[0], a[1], a[2], a[4], a[3], a[5]]  # [x, y, z, roll, pitch, yaw] for env compat
+        return action, self._buttons[:]
 
     def close(self):
         self._running = False
