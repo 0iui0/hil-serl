@@ -149,63 +149,100 @@ class GripperPenaltyWrapper(gym.Wrapper):
         return observation, reward, terminated, truncated, info
 
 
-class EvdevSpaceMouse:
-    """Reads SpaceMouse via evdev (Jetson/ARM compatible, no HID).
+class HidrawSpaceMouse:
+    """Reads SpaceMouse via hidraw (easyhid) — works on both USB and Bluetooth.
 
-    Background thread caches latest axes/buttons state.
-    Same implementation as cr5af_server.EvdevSpaceMouse, duplicated here so
+    Background thread polls hidraw for HID reports, caches latest state.
+    Same implementation as cr5af_server.HidrawSpaceMouse, duplicated here so
     the env can read SpaceMouse directly without HTTP round trips.
     """
 
+    _SUPPORTED_IDS = [(0x256F, 0xC63A), (0x256F, 0xC62E)]
+
     def __init__(self, device_path: str = ""):
-        import evdev
-
-        if not device_path:
-            for ev in sorted(glob.glob("/dev/input/event*")):
-                try:
-                    name = open(
-                        f"/sys/class/input/{ev.split('/')[-1]}/device/name"
-                    ).read().strip()
-                    if "SpaceMouse" in name or "Space Navigator" in name:
-                        device_path = ev
-                        break
-                except Exception:
-                    pass
-
         self._device = None
         self._axes = [0.0] * 6
         self._buttons = [0, 0]
         self._running = True
 
-        if not device_path:
-            print("WARNING: No SpaceMouse found. Action returns zeros.")
+        try:
+            from easyhid import Enumeration
+        except ImportError:
+            print("WARNING: easyhid not installed. SpaceMouse will return zeros.")
             return
 
-        self._device = evdev.InputDevice(device_path)
-        self._thread = threading.Thread(target=self._ev_loop, daemon=True)
-        self._thread.start()
-        print(f"SpaceMouse connected: {device_path}")
+        hid = Enumeration()
+        all_hids = hid.find()
 
-    def _ev_loop(self):
-        import evdev
-        try:
-            for event in self._device.read_loop():
-                if not self._running:
+        found_dev = None
+        if device_path:
+            for d in all_hids:
+                if d.path == device_path:
+                    for vid, pid in self._SUPPORTED_IDS:
+                        if d.vendor_id == vid and d.product_id == pid:
+                            found_dev = d
+                            break
+                    if found_dev:
+                        break
+        else:
+            for d in all_hids:
+                for vid, pid in self._SUPPORTED_IDS:
+                    if d.vendor_id == vid and d.product_id == pid:
+                        found_dev = d
+                        break
+                if found_dev:
                     break
-                if event.type == evdev.ecodes.EV_ABS and event.code <= 5:
-                    self._axes[event.code] = event.value / 350.0
-                elif event.type == evdev.ecodes.EV_KEY:
-                    if event.code == 256:
-                        self._buttons[0] = event.value
-                    elif event.code == 257:
-                        self._buttons[1] = event.value
-        except Exception:
-            pass
+
+        if found_dev is None:
+            print("WARNING: No SpaceMouse found via hidraw. Action returns zeros.")
+            return
+
+        try:
+            found_dev.open()
+            found_dev.set_nonblocking(True)
+        except Exception as e:
+            print(f"WARNING: Failed to open SpaceMouse hidraw: {e}")
+            print("  Try: sudo chmod 666 /dev/hidraw*")
+            return
+
+        self._device = found_dev
+        self._bytes_to_read = 13
+
+        self._thread = threading.Thread(target=self._hidraw_loop, daemon=True)
+        self._thread.start()
+        print(f"SpaceMouse connected: {found_dev.path} (vid=0x{found_dev.vendor_id:04X} pid=0x{found_dev.product_id:04X})")
+
+    def _to_int16(self, lo, hi):
+        val = lo | (hi << 8)
+        if val >= 32768:
+            val = -(65536 - val)
+        return val
+
+    def _hidraw_loop(self):
+        while self._running:
+            try:
+                data = self._device.read(self._bytes_to_read)
+                if not data:
+                    data = self._device.read(self._bytes_to_read, timeout_ms=50)
+                if data and len(data) >= 3:
+                    channel = data[0]
+                    if channel == 1 and len(data) >= 13:
+                        self._axes[0] = self._to_int16(data[1], data[2]) / 350.0
+                        self._axes[1] = self._to_int16(data[3], data[4]) / -350.0
+                        self._axes[2] = self._to_int16(data[5], data[6]) / -350.0
+                        self._axes[3] = self._to_int16(data[7], data[8]) / -350.0
+                        self._axes[4] = self._to_int16(data[9], data[10]) / -350.0
+                        self._axes[5] = self._to_int16(data[11], data[12]) / 350.0
+                    elif channel == 3 and len(data) >= 2:
+                        btn_byte = data[1]
+                        self._buttons[0] = 1 if (btn_byte & 0x01) else 0
+                        self._buttons[1] = 1 if (btn_byte & 0x02) else 0
+            except Exception:
+                pass
+            time.sleep(0.001)
 
     def get_state(self) -> tuple:
-        a = self._axes
-        action = [-a[1], a[0], a[2], -a[3], -a[4], -a[5]]
-        return action, self._buttons.copy()
+        return self._axes[:], self._buttons[:]
 
     def close(self):
         self._running = False
@@ -217,7 +254,7 @@ class EvdevSpaceMouse:
 
 
 class ServerSpacemouseIntervention(gym.ActionWrapper):
-    """Reads SpaceMouse directly via evdev (no HTTP).
+    """Reads SpaceMouse directly via hidraw (no HTTP).
 
     Drop-in replacement that eliminates the /get_spacemouse HTTP round trip.
     The SpaceMouse device must not be opened by cr5af_server — start server
@@ -229,12 +266,12 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
         self.gripper_enabled = self.action_space.shape == (7,)
         self.left = False
         self.right = False
-        self._sm = EvdevSpaceMouse()
+        self._sm = HidrawSpaceMouse()
         self._zero_offset: np.ndarray | None = None
         self._calibrate_zero()
 
     def _calibrate_zero(self, samples: int = 30):
-        print("Calibrating SpaceMouse zero offset via evdev...")
+        print("Calibrating SpaceMouse zero offset...")
         vals = []
         for _ in range(samples):
             action, _ = self._sm.get_state()
