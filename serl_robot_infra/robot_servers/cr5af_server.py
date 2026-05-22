@@ -41,7 +41,7 @@ flags.DEFINE_list(
     [0, 0, 0, -90, 0, 45],
     "Home joint angles in degrees for jointreset",
 )
-flags.DEFINE_string("spacemouse_device", "", "SpaceMouse evdev device path (auto-detect if empty)")
+flags.DEFINE_string("spacemouse_device", "", "SpaceMouse hidraw device path (auto-detect if empty)")
 flags.DEFINE_boolean("no_spacemouse", False, "Disable SpaceMouse teleop server")
 flags.DEFINE_boolean("teleop", False, "Enable background SpaceMouse teleop (for standalone testing)")
 flags.DEFINE_float("teleop_action_scale", 8.0, "Teleop: mm per unit of SpaceMouse input")
@@ -57,64 +57,114 @@ RAD2DEG = 180.0 / np.pi
 NUM_JOINTS = 6
 
 
-class EvdevSpaceMouse:
-    """Reads SpaceMouse via evdev for Jetson/ARM where hidraw is blocked.
+class HidrawSpaceMouse:
+    """Reads SpaceMouse via hidraw (easyhid) — works on both USB and Bluetooth.
 
-    Background thread caches latest axes/buttons state.
+    Background thread polls hidraw for HID reports, caches latest state.
     Returns the same action format as SpaceMouseExpert:
-      action = [-ev_Y, ev_X, ev_Z, -ev_RX, -ev_RY, -ev_RZ]
+      action = [x, y, z, roll, pitch, yaw]  (normalized to ~[-1, 1])
       buttons = [BTN_0, BTN_1]
     """
 
+    # SpaceMouse Wireless BT: vid=0x256F, pid=0xC63A
+    # SpaceMouse Wireless (USB dongle): vid=0x256F, pid=0xC62E
+    _SUPPORTED_IDS = [(0x256F, 0xC63A), (0x256F, 0xC62E)]
+
     def __init__(self, device_path: str = ""):
-        import evdev
-
-        if not device_path:
-            for ev in sorted(glob.glob("/dev/input/event*")):
-                try:
-                    name = open(
-                        f"/sys/class/input/{ev.split('/')[-1]}/device/name"
-                    ).read().strip()
-                    if "SpaceMouse" in name or "Space Navigator" in name:
-                        device_path = ev
-                        break
-                except Exception:
-                    pass
-
         self._device = None
-        self._axes = [0.0] * 6
+        self._axes = [0.0] * 6  # [x, y, z, roll, pitch, yaw] normalized
         self._buttons = [0, 0]
         self._running = True
 
-        if not device_path:
-            print("WARNING: No SpaceMouse found. /get_spacemouse returns zeros.")
+        try:
+            from easyhid import Enumeration
+        except ImportError:
+            print("WARNING: easyhid not installed. SpaceMouse will return zeros.")
+            print("  Install: pip install easyhid")
             return
 
-        self._device = evdev.InputDevice(device_path)
-        self._thread = threading.Thread(target=self._ev_loop, daemon=True)
-        self._thread.start()
-        print(f"SpaceMouse connected: {device_path}")
+        hid = Enumeration()
+        all_hids = hid.find()
 
-    def _ev_loop(self):
-        import evdev
-        try:
-            for event in self._device.read_loop():
-                if not self._running:
+        # If device_path specified, use it directly; otherwise auto-detect
+        found_dev = None
+        if device_path:
+            for d in all_hids:
+                if d.path == device_path:
+                    for vid, pid in self._SUPPORTED_IDS:
+                        if d.vendor_id == vid and d.product_id == pid:
+                            found_dev = d
+                            break
+                    if found_dev:
+                        break
+        else:
+            for d in all_hids:
+                for vid, pid in self._SUPPORTED_IDS:
+                    if d.vendor_id == vid and d.product_id == pid:
+                        found_dev = d
+                        break
+                if found_dev:
                     break
-                if event.type == evdev.ecodes.EV_ABS and event.code <= 5:
-                    self._axes[event.code] = event.value / 350.0
-                elif event.type == evdev.ecodes.EV_KEY:
-                    if event.code == 256:
-                        self._buttons[0] = event.value
-                    elif event.code == 257:
-                        self._buttons[1] = event.value
-        except Exception:
-            pass
+
+        if found_dev is None:
+            print("WARNING: No SpaceMouse found via hidraw. Teleop will return zeros.")
+            return
+
+        try:
+            found_dev.open()
+            found_dev.set_nonblocking(True)
+        except Exception as e:
+            print(f"WARNING: Failed to open SpaceMouse hidraw: {e}")
+            print("  Try: sudo chmod 666 /dev/hidraw*")
+            return
+
+        self._device = found_dev
+        self._product_id = found_dev.product_id
+        # pid C63A (BT) and C62E (Wireless dongle) use 13-byte reports:
+        # channel 1: [1, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi, pitch_lo, pitch_hi, roll_lo, roll_hi, yaw_lo, yaw_hi]
+        # channel 3: [3, ..., btn_byte, ...]
+        self._bytes_to_read = 13
+
+        self._thread = threading.Thread(target=self._hidraw_loop, daemon=True)
+        self._thread.start()
+        print(f"SpaceMouse connected: {found_dev.path} (vid=0x{found_dev.vendor_id:04X} pid=0x{found_dev.product_id:04X})")
+
+    def _hidraw_loop(self):
+        """Background loop: poll hidraw device for HID reports."""
+        def _to_int16(lo, hi):
+            val = lo | (hi << 8)
+            if val >= 32768:
+                val = -(65536 - val)
+            return val
+
+        while self._running:
+            try:
+                data = self._device.read(self._bytes_to_read)
+                # Fallback: try with short timeout if nonblocking returns empty
+                if not data:
+                    data = self._device.read(self._bytes_to_read, timeout_ms=50)
+                if data and len(data) >= 3:
+                    channel = data[0]
+                    if channel == 1 and len(data) >= 13:
+                        # Axes: all 6 DOF in a single report (Wireless BT format)
+                        self._axes[0] = _to_int16(data[1], data[2]) / 350.0   # x
+                        self._axes[1] = _to_int16(data[3], data[4]) / -350.0  # y (inverted)
+                        self._axes[2] = _to_int16(data[5], data[6]) / 350.0  # z
+                        self._axes[3] = _to_int16(data[7], data[8]) / -350.0  # pitch (inverted)
+                        self._axes[4] = _to_int16(data[9], data[10]) / -350.0 # roll (inverted)
+                        self._axes[5] = _to_int16(data[11], data[12]) / 350.0 # yaw
+                    elif channel == 3 and len(data) >= 2:
+                        # Buttons: bit 0 = left, bit 1 = right
+                        btn_byte = data[1]
+                        self._buttons[0] = 1 if (btn_byte & 0x01) else 0
+                        self._buttons[1] = 1 if (btn_byte & 0x02) else 0
+            except Exception:
+                pass
+            time.sleep(0.001)  # ~1ms poll interval, ~1000Hz max
 
     def get_state(self) -> tuple[list[float], list[int]]:
-        a = self._axes
-        action = [-a[1], a[0], a[2], -a[3], -a[4], -a[5]]
-        return action, self._buttons.copy()
+        """Return (action, buttons) matching SpaceMouseExpert format."""
+        return self._axes[:], self._buttons[:]
 
     def close(self):
         self._running = False
@@ -519,7 +569,7 @@ class CR5AFServer:
 
     # ── Teleop (SpaceMouse → ServoP background thread) ──────────────────
 
-    def start_teleop(self, spacemouse: "EvdevSpaceMouse",
+    def start_teleop(self, spacemouse: "HidrawSpaceMouse",
                      action_scale: float = 8.0, rot_scale: float = 3.0,
                      hz: float = 33.0, dead_zone: float = 0.15,
                      delta_threshold: float = 0.3):
@@ -567,10 +617,10 @@ class CR5AFServer:
                     time.sleep(dt)
                     continue
 
-                dx, dy, dz, droll, dpitch, dyaw = action[:6]
+                dx, dy, dz, dpitch, droll, dyaw = action[:6]
                 delta = np.array([
                     -dx * self._teleop_action_scale,
-                    dy * self._teleop_action_scale,
+                    -dy * self._teleop_action_scale,
                     -dz * self._teleop_action_scale,
                     dpitch * self._teleop_rot_scale,
                     droll * self._teleop_rot_scale,
@@ -676,9 +726,9 @@ def main(argv):
         safe=FLAGS.safe,
     )
 
-    spacemouse: EvdevSpaceMouse | None = None
+    spacemouse: HidrawSpaceMouse | None = None
     if not FLAGS.no_spacemouse:
-        spacemouse = EvdevSpaceMouse(device_path=FLAGS.spacemouse_device)
+        spacemouse = HidrawSpaceMouse(device_path=FLAGS.spacemouse_device)
         if FLAGS.teleop and spacemouse._device is not None and not server.safe:
             server.start_teleop(
                 spacemouse,

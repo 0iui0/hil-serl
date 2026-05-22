@@ -229,7 +229,7 @@ class HidrawSpaceMouse:
                     if channel == 1 and len(data) >= 13:
                         self._axes[0] = self._to_int16(data[1], data[2]) / 350.0
                         self._axes[1] = self._to_int16(data[3], data[4]) / -350.0
-                        self._axes[2] = self._to_int16(data[5], data[6]) / -350.0
+                        self._axes[2] = self._to_int16(data[5], data[6]) / 350.0
                         self._axes[3] = self._to_int16(data[7], data[8]) / -350.0
                         self._axes[4] = self._to_int16(data[9], data[10]) / -350.0
                         self._axes[5] = self._to_int16(data[11], data[12]) / 350.0
@@ -243,7 +243,7 @@ class HidrawSpaceMouse:
 
     def get_state(self) -> tuple:
         a = self._axes  # [x, y, z, pitch, roll, yaw]
-        action = [a[0], a[1], -a[2], a[4], a[3], a[5]]  # env compat: swap pitch/roll, flip z
+        action = [a[0], a[1], a[2], a[4], a[3], a[5]]  # env compat: swap pitch/roll
         return action, self._buttons[:]
 
     def close(self):
