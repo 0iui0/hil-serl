@@ -164,7 +164,9 @@ class HidrawSpaceMouse:
 
     def get_state(self) -> tuple[list[float], list[int]]:
         """Return (action, buttons) matching SpaceMouseExpert format."""
-        return self._axes[:], self._buttons[:]
+        a = self._axes  # [x, y, z, pitch, roll, yaw]
+        action = [a[1], a[0], a[2], a[4], a[3], a[5]]  # swap x<->y, pitch<->roll
+        return action, self._buttons[:]
 
     def close(self):
         self._running = False
