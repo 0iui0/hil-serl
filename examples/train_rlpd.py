@@ -44,6 +44,7 @@ flags.DEFINE_boolean("actor", False, "Whether this is an actor.")
 flags.DEFINE_string("ip", "localhost", "IP address of the learner.")
 flags.DEFINE_multi_string("demo_path", None, "Path to the demo data.")
 flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
+flags.DEFINE_string("bc_checkpoint_path", None, "Path to BC checkpoint to initialize actor weights.")
 flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
@@ -242,6 +243,9 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
 
         timer.tock("total")
 
+        if step % 10 == 0:
+            client.update()
+
         if step % config.log_period == 0:
             stats = {"timer": timer.get_average_times()}
             client.request("send-stats", stats)
@@ -289,6 +293,7 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
     )
     while len(replay_buffer) < config.training_starts:
         pbar.update(len(replay_buffer) - pbar.n)  # Update progress bar
+        server.publish_network(agent.state.params)
         time.sleep(1)
     pbar.update(len(replay_buffer) - pbar.n)  # Update progress bar
     pbar.close()
@@ -379,7 +384,7 @@ def main(_):
     env = config.get_environment(
         fake_env=FLAGS.learner,
         save_video=FLAGS.save_video,
-        classifier=True,
+        classifier=FLAGS.actor,
     )
     env = RecordEpisodeStatistics(env)
 
@@ -425,7 +430,12 @@ def main(_):
         jax.tree_map(jnp.array, agent), sharding.replicate()
     )
 
-    if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
+    latest_ckpt = (
+        checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path))
+        if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
+        else None
+    )
+    if latest_ckpt is not None:
         if sys.stdin.isatty():
             input("Checkpoint path already exists. Press Enter to resume training.")
         else:
@@ -435,10 +445,33 @@ def main(_):
             agent.state,
         )
         agent = agent.replace(state=ckpt)
-        ckpt_number = os.path.basename(
-            checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path))
-        )[11:]
+        ckpt_number = os.path.basename(latest_ckpt)[11:]
         print_green(f"Loaded previous checkpoint at step {ckpt_number}.")
+    elif FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path):
+        print_green("Checkpoint dir exists but no checkpoints found. Starting fresh.")
+
+    # Load BC weights into actor if no RLPD checkpoint was loaded
+    if latest_ckpt is None and FLAGS.bc_checkpoint_path:
+        from serl_launcher.utils.launcher import make_bc_agent
+        bc_agent = make_bc_agent(
+            seed=FLAGS.seed,
+            sample_obs=env.observation_space.sample(),
+            sample_action=env.action_space.sample(),
+            image_keys=config.image_keys,
+            encoder_type=config.encoder_type,
+        )
+        bc_ckpt = checkpoints.restore_checkpoint(
+            os.path.abspath(FLAGS.bc_checkpoint_path),
+            bc_agent.state,
+        )
+        bc_actor_params = bc_ckpt.params['modules_actor']
+        sac_params = agent.state.params
+        new_params = {
+            **sac_params,
+            'modules_actor': bc_actor_params,
+        }
+        agent = agent.replace(state=agent.state.replace(params=new_params))
+        print_green(f"Loaded BC actor weights from {FLAGS.bc_checkpoint_path}")
 
     def create_replay_buffer_and_wandb_logger():
         replay_buffer = MemoryEfficientReplayBufferDataStore(
