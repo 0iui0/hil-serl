@@ -16,6 +16,21 @@ except ImportError:
     _HAS_TF = False
 
 
+def _to_scalar(v):
+    """Convert JAX/numpy arrays to Python scalars for wandb logging."""
+    try:
+        import jax.numpy as jnp
+        if isinstance(v, jnp.ndarray):
+            return float(v.item()) if v.ndim == 0 else float(v.mean())
+    except ImportError:
+        pass
+    if isinstance(v, np.ndarray):
+        return float(v.item()) if v.ndim == 0 else float(v.mean())
+    if isinstance(v, (int, float)):
+        return v
+    return v
+
+
 def _recursive_flatten_dict(d: dict):
     keys, values = [], []
     for key, value in d.items():
@@ -109,7 +124,7 @@ class WandBLogger(object):
 
     def log(self, data: dict, step: int = None):
         data_flat = _recursive_flatten_dict(data)
-        data = {k: v for k, v in zip(*data_flat)}
+        data = {k: _to_scalar(v) for k, v in zip(*data_flat)}
         wandb.log(data, step=step)
 
         if self._tb_writer is not None and step is not None:
