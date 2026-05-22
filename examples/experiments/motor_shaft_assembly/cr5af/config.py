@@ -27,18 +27,24 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     # Single external camera (hand-eye). Add more entries for additional cameras.
     REALSENSE_CAMERAS = {
         "external": {
-            "serial_number": "333422302713",  # D455 on Jetson Thor
+            "serial_number": "333422302713",  # D455 #1 on Jetson Thor
+            "dim": (640, 480),
+            "exposure": 40000,
+        },
+        "wrist": {
+            "serial_number": "246322300995",  # D455 #2 (new)
             "dim": (640, 480),
             "exposure": 40000,
         },
     }
     IMAGE_CROP = {
-        "external": lambda img: img[100:400, 150:500],
+        "external": lambda img: img[122:442, 206:502],
+        "wrist": lambda img: img[97:368, 115:399],
     }
 
     # Calibrated 2025-05-18 with CR5AF
     # Units: XYZ in meters, rotation in degrees
-    RESET_POSE = np.array([0.6500, -0.150, 0.220, 179.9, 0, 0])
+    RESET_POSE = np.array([0.700, -0.145, 0.160, 180, 0, 0])
     GRASP_POSE = np.array([0.7000, -0.1750, 0.2000, -180.00, -0.00, 0.00])
     TARGET_POSE = np.array([0.7100, -0.1750, 0.1260, -180.00, -0.00, 0.00])
     REWARD_THRESHOLD = np.array([0.005, 0.005, 0.005, 2.0, 2.0, 2.0])
@@ -75,7 +81,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
 
 
 class TrainConfig(DefaultTrainingConfig):
-    image_keys = ["external"]
+    image_keys = ["external", "wrist"]
     classifier_keys = ["external"]
     proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
     buffer_period = 1000
