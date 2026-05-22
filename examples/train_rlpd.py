@@ -167,12 +167,21 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                 actions = env.action_space.sample()
             else:
                 sampling_rng, key = jax.random.split(sampling_rng)
+                use_argmax = step < 500  # deterministic BC policy for first 500 steps
                 actions = agent.sample_actions(
                     observations=jax.device_put(obs),
                     seed=key,
-                    argmax=False,
+                    argmax=use_argmax,
                 )
                 actions = np.asarray(jax.device_get(actions))
+                if step < 50 or step % 200 == 0:
+                    actions_argmax = agent.sample_actions(
+                        observations=jax.device_put(obs),
+                        seed=key,
+                        argmax=True,
+                    )
+                    actions_argmax = np.asarray(jax.device_get(actions_argmax))
+                    print(f"[POLICY step={step}] sample={np.round(actions, 3)} argmax={np.round(actions_argmax, 3)}")
 
         # Step environment
         with timer.context("step_env"):
@@ -465,13 +474,28 @@ def main(_):
             bc_agent.state,
         )
         bc_actor_params = bc_ckpt.params['modules_actor']
+        # Reset log_std head to small values to avoid large exploration noise.
+        # BC std ~0.86 causes tanh(mean+0.86*noise) to saturate near ±1.
+        # Start with std≈0.1 so argmax≈sample; RL can increase std if needed.
+        std_reset_key = jax.random.PRNGKey(FLAGS.seed + 123)
+        std_kernel = bc_actor_params['Dense_1']['kernel']
+        new_std_kernel = jax.random.normal(std_reset_key, std_kernel.shape) * 0.001
+        new_std_bias = jnp.ones_like(bc_actor_params['Dense_1']['bias']) * (-2.3)  # exp(-2.3) ≈ 0.1
+        bc_actor_params = {
+            **bc_actor_params,
+            'Dense_1': {
+                **bc_actor_params['Dense_1'],
+                'kernel': new_std_kernel,
+                'bias': new_std_bias,
+            },
+        }
         sac_params = agent.state.params
         new_params = {
             **sac_params,
             'modules_actor': bc_actor_params,
         }
         agent = agent.replace(state=agent.state.replace(params=new_params))
-        print_green(f"Loaded BC actor weights from {FLAGS.bc_checkpoint_path}")
+        print_green(f"Loaded BC actor weights from {FLAGS.bc_checkpoint_path} (std reset)")
 
     def create_replay_buffer_and_wandb_logger():
         replay_buffer = MemoryEfficientReplayBufferDataStore(
