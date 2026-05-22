@@ -243,7 +243,7 @@ class HidrawSpaceMouse:
 
     def get_state(self) -> tuple:
         a = self._axes  # [x, y, z, pitch, roll, yaw]
-        action = [a[1], a[0], a[2], a[4], a[3], a[5]]  # env compat: swap x<->y, pitch<->roll
+        action = [a[1], -a[0], a[2], a[4], a[3], a[5]]  # env compat: swap x<->y, pitch<->roll
         return action, self._buttons[:]
 
     def close(self):
