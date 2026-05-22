@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import glob
+import sys
 import time
 import jax
 import jax.numpy as jnp
@@ -115,9 +116,10 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
         print(f"average time: {np.mean(time_list)}")
         return  # after done eval, return and exit
     
+    buffer_files = natsorted(glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")))
     start_step = (
-        int(os.path.basename(natsorted(glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")))[-1])[12:-4]) + 1
-        if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
+        int(os.path.basename(buffer_files[-1])[12:-4]) + 1
+        if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path) and buffer_files
         else 0
     )
 
@@ -383,7 +385,7 @@ def main(_):
 
     rng, sampling_rng = jax.random.split(rng)
     
-    if config.setup_mode == 'single-arm-fixed-gripper' or config.setup_mode == 'dual-arm-fixed-gripper':   
+    if config.setup_mode == 'single-arm-fixed-gripper' or config.setup_mode == 'dual-arm-fixed-gripper':
         agent: SACAgent = make_sac_pixel_agent(
             seed=FLAGS.seed,
             sample_obs=env.observation_space.sample(),
@@ -391,6 +393,7 @@ def main(_):
             image_keys=config.image_keys,
             encoder_type=config.encoder_type,
             discount=config.discount,
+            policy_network_kwargs=getattr(config, 'policy_network_kwargs', None),
         )
         include_grasp_penalty = False
     elif config.setup_mode == 'single-arm-learned-gripper':
@@ -423,7 +426,10 @@ def main(_):
     )
 
     if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
-        input("Checkpoint path already exists. Press Enter to resume training.")
+        if sys.stdin.isatty():
+            input("Checkpoint path already exists. Press Enter to resume training.")
+        else:
+            print_green("Checkpoint path already exists. Resuming training.")
         ckpt = checkpoints.restore_checkpoint(
             os.path.abspath(FLAGS.checkpoint_path),
             agent.state,

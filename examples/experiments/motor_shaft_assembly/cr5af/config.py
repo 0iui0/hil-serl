@@ -84,6 +84,8 @@ class TrainConfig(DefaultTrainingConfig):
     encoder_type = "resnet-pretrained"
     # Auto-switch training mode based on gripper availability
     setup_mode = "single-arm-learned-gripper" if EnvConfig.USE_GRIPPER else "single-arm-fixed-gripper"
+    # Match BC checkpoint architecture (BCAgent uses [512, 512, 512])
+    policy_network_kwargs = {"hidden_dims": [512, 512, 512]}
     gripper_penalty = -0.05
 
     def get_environment(self, fake_env=False, save_video=False, classifier=False, server_url=None):

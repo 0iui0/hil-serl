@@ -56,7 +56,14 @@ def make_sac_pixel_agent(
     reward_bias=0.0,
     target_entropy=None,
     discount=0.97,
+    policy_network_kwargs=None,
 ):
+    policy_network_kwargs = {
+        "activations": nn.tanh,
+        "use_layer_norm": True,
+        "hidden_dims": [256, 256],
+        **(policy_network_kwargs or {}),
+    }
     agent = SACAgent.create_pixels(
         jax.random.PRNGKey(seed),
         sample_obs,
@@ -75,11 +82,7 @@ def make_sac_pixel_agent(
             "use_layer_norm": True,
             "hidden_dims": [256, 256],
         },
-        policy_network_kwargs={
-            "activations": nn.tanh,
-            "use_layer_norm": True,
-            "hidden_dims": [256, 256],
-        },
+        policy_network_kwargs=policy_network_kwargs,
         temperature_init=1e-2,
         discount=discount,
         backup_entropy=False,
