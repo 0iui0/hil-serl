@@ -3,18 +3,15 @@ import pickle as pkl
 import requests
 from collections import defaultdict
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-
-import imageio
 import jax
 import jax.numpy as jnp
 import numpy as np
-import tensorflow as tf
 import wandb
 from flax.core import frozen_dict
 from flax.training import checkpoints
 
-def ask_for_frame(images_dict):    
+def ask_for_frame(images_dict):
+    import matplotlib.pyplot as plt
     # Create a new figure
     fig, axes = plt.subplots(5, 5, figsize=(15, 20))
     
@@ -68,6 +65,8 @@ def concat_batches(offline_batch, online_batch, axis=1):
 def load_recorded_video(
     video_path: str,
 ):
+    import tensorflow as tf
+    import imageio
     with tf.io.gfile.GFile(video_path, "rb") as f:
         video = np.array(imageio.mimread(f, "MP4")).transpose((0, 3, 1, 2))
         assert video.shape[1] == 3, "Numpy array should be (T, C, H, W)"
