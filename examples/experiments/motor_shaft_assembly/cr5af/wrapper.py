@@ -48,7 +48,6 @@ class MotorShaftEnv(CR5AFEnv):
         self.curr_path_length = 0
         self.success = False
 
-        self._zero_force_sensor()
         self._update_currpos()
         self._target_pos = None  # force re-init on first step of new episode
         self._servop_active = False

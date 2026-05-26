@@ -59,7 +59,11 @@ class MemoryEfficientReplayBufferDataStore(MemoryEfficientReplayBuffer, DataStor
     # ensure thread safety
     def insert(self, *args, **kwargs):
         with self._lock:
+            idx = self._insert_index
+            old_len = len(self)
             super(MemoryEfficientReplayBufferDataStore, self).insert(*args, **kwargs)
+            if idx % 100 == 0 or idx < 5000:
+                print(f"[DATASTORE] insert #{idx} total={len(self)} (was {old_len})")
 
     # ensure thread safety
     def sample(self, *args, **kwargs):

@@ -97,6 +97,7 @@ class DefaultCR5AFEnvConfig:
     MAX_TRANSLATION_DELTA_MM: float = 3.0    # cap single-step translation per axis
     MAX_ROTATION_DELTA_DEG: float = 3.0      # cap single-step rotation
     MIN_DELTA_MM: float = 0.1                # skip ServoP below this (lower = less filtering)
+    MAX_ORIENTATION_DEVIATION_DEG: float = 0.0  # 0 = no constraint
 
 
 class CR5AFEnv(gym.Env):
@@ -122,6 +123,9 @@ class CR5AFEnv(gym.Env):
         self.max_translation_delta = config.MAX_TRANSLATION_DELTA_MM / 1000.0  # per-axis
         self.max_rotation_delta = np.deg2rad(config.MAX_ROTATION_DELTA_DEG)
         self.min_delta = config.MIN_DELTA_MM / 1000.0
+        # Orientation constraint: clamp TCP rotation to reset pose ± this value
+        self.max_orient_dev = np.deg2rad(config.MAX_ORIENTATION_DEVIATION_DEG)
+        self._reset_euler = np.deg2rad(config.RESET_POSE[3:])  # target orientation in rad
         self._servop_active = False
         self._target_pos: np.ndarray | None = None  # tracked ServoP target, not RT cache
 
@@ -214,6 +218,18 @@ class CR5AFEnv(gym.Env):
         )
         euler[1:] = np.clip(euler[1:], self.rpy_bounding_box.low[1:], self.rpy_bounding_box.high[1:])
         pose[3:] = R.from_euler("xyz", euler).as_quat()
+
+        # Clamp orientation to reset pose ± max_orient_dev
+        if self.max_orient_dev > 0:
+            euler = R.from_quat(pose[3:]).as_euler("XYZ")
+            for i in range(3):
+                euler[i] = np.clip(
+                    euler[i],
+                    self._reset_euler[i] - self.max_orient_dev,
+                    self._reset_euler[i] + self.max_orient_dev,
+                )
+            pose[3:] = R.from_euler("XYZ", euler).as_quat()
+
         return pose
 
     def step(self, action: np.ndarray) -> tuple:
@@ -414,7 +430,6 @@ class CR5AFEnv(gym.Env):
         self._recover()
         self.go_to_reset(joint_reset=joint_reset)
         self._recover()
-        self._zero_force_sensor()
         self.curr_path_length = 0
 
         self._update_currpos()

@@ -21,6 +21,7 @@ from experiments.motor_shaft_assembly.cr5af.wrapper import (
 )
 
 
+
 # TODO: fill in real values when CR5AF is connected and workspace is calibrated
 class EnvConfig(DefaultCR5AFEnvConfig):
     SERVER_URL = "http://192.168.16.158:5000/"
@@ -40,17 +41,17 @@ class EnvConfig(DefaultCR5AFEnvConfig):
         },
     }
     IMAGE_CROP = {
-        "external": lambda img: img[158:418, 234:500],
-        "wrist": lambda img: img[111:364, 101:387],
+        "external": lambda img: img[29:282, 259:454],
+        "wrist": lambda img: img[50:315, 160:395],
     }
 
     # Calibrated 2025-05-18 with CR5AF
     # Units: XYZ in meters, rotation in degrees
     RESET_POSE = np.array([0.700, -0.145, 0.160, 180, 0, 0])
     GRASP_POSE = np.array([0.7000, -0.1750, 0.2000, -180.00, -0.00, 0.00])
-    TARGET_POSE = np.array([0.7100, -0.1750, 0.1260, -180.00, -0.00, 0.00])
+    TARGET_POSE = np.array([0.7238, -0.1284, 0.1191, 180, 0, 0])
     REWARD_THRESHOLD = np.array([0.005, 0.005, 0.005, 2.0, 2.0, 2.0])
-    ACTION_SCALE = (0.01, 0.06, 1)
+    ACTION_SCALE = (0.003, 0.05, 1)
     ABS_POSE_LIMIT_LOW = np.array([0.400, -0.300, 0.100, -180, -90, -180])
     ABS_POSE_LIMIT_HIGH = np.array([0.800, 0.000, 0.500, 180, 90, 180])
 
@@ -59,6 +60,8 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     RANDOM_RZ_RANGE = 0.05
     DISPLAY_IMAGE = True
     MAX_EPISODE_LENGTH = 200            # 8s at 25Hz (aligned with Franka ~6-10s)
+    # Constrain TCP orientation to RESET_POSE rotation ± this many degrees
+    MAX_ORIENTATION_DEVIATION_DEG = 1.0
     # Per-step delta caps for RL safety (25Hz × 3mm = 75mm/s)
     MAX_TRANSLATION_DELTA_MM = 3.0
     MAX_ROTATION_DELTA_DEG = 3.0
@@ -68,7 +71,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     USE_GRIPPER = False                 # False = fixed-flange (current), True = learned-gripper (future)
     GRASP_FORCE_THRESHOLD = 2.0         # N, minimum force to confirm grasp
     FORCE_THRESHOLD = 1.0              # N, |fz| threshold for insertion success
-    CLASSIFIER_THRESHOLD = 0.5         # sigmoid score threshold for insertion detection
+    CLASSIFIER_THRESHOLD = 0.9         # sigmoid score threshold for insertion detection
 
     # FC impedance params (CR5AF FC mode stiffness/damping)
     # Higher damping prevents oscillation; moderate stiffness tracks SpaceMouse crisply
@@ -84,7 +87,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
 
 class TrainConfig(DefaultTrainingConfig):
     image_keys = ["external", "wrist"]
-    classifier_keys = ["external"]
+    classifier_keys = ["external", "wrist"]
     proprio_keys = ["tcp_pose", "tcp_vel", "tcp_force", "tcp_torque", "gripper_pose"]
     buffer_period = 1000
     checkpoint_period = 5000
@@ -129,17 +132,7 @@ class TrainConfig(DefaultTrainingConfig):
 
             def reward_func(obs):
                 sigmoid = lambda x: 1 / (1 + jnp.exp(-x))
-                # State layout: tcp_pose(6) + tcp_vel(6) + tcp_force(3) + tcp_torque(3) + gripper_pose(1)
-                # tcp_force indices: [12]=fx, [13]=fy, [14]=fz
-                cls_score = float(sigmoid(classifier(obs))[0])
-                result = int(cls_score > env_config.CLASSIFIER_THRESHOLD)
-                if not hasattr(reward_func, '_counter'):
-                    reward_func._counter = 0
-                reward_func._counter += 1
-                if result or cls_score > 0.3 or reward_func._counter % 25 == 0:
-                    tag = "HIT" if result else "  "
-                    print(f"[REWARD {reward_func._counter:04d}] {tag} cls={cls_score:.3f}")
-                return result
+                return int(sigmoid(classifier(obs)) > env_config.CLASSIFIER_THRESHOLD)
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
 
