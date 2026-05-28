@@ -11,7 +11,6 @@ Workflow (learned-gripper mode):
 """
 import copy
 import glob
-import threading
 import time
 
 import gymnasium as gym
@@ -19,6 +18,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from cr5af_env.envs.cr5af_env import CR5AFEnv, DefaultCR5AFEnvConfig
+from franka_env.hidraw_spacemouse import HidrawSpaceMouse
 
 
 class MotorShaftEnv(CR5AFEnv):
@@ -148,111 +148,6 @@ class GripperPenaltyWrapper(gym.Wrapper):
         return observation, reward, terminated, truncated, info
 
 
-class HidrawSpaceMouse:
-    """Reads SpaceMouse via hidraw (easyhid) — works on both USB and Bluetooth.
-
-    Background thread polls hidraw for HID reports, caches latest state.
-    Same implementation as cr5af_server.HidrawSpaceMouse, duplicated here so
-    the env can read SpaceMouse directly without HTTP round trips.
-    """
-
-    _SUPPORTED_IDS = [(0x256F, 0xC63A), (0x256F, 0xC62E)]
-
-    def __init__(self, device_path: str = ""):
-        self._device = None
-        self._axes = [0.0] * 6
-        self._buttons = [0, 0]
-        self._running = True
-
-        try:
-            from easyhid import Enumeration
-        except ImportError:
-            print("WARNING: easyhid not installed. SpaceMouse will return zeros.")
-            return
-
-        hid = Enumeration()
-        all_hids = hid.find()
-
-        found_dev = None
-        if device_path:
-            for d in all_hids:
-                if d.path == device_path:
-                    for vid, pid in self._SUPPORTED_IDS:
-                        if d.vendor_id == vid and d.product_id == pid:
-                            found_dev = d
-                            break
-                    if found_dev:
-                        break
-        else:
-            for d in all_hids:
-                for vid, pid in self._SUPPORTED_IDS:
-                    if d.vendor_id == vid and d.product_id == pid:
-                        found_dev = d
-                        break
-                if found_dev:
-                    break
-
-        if found_dev is None:
-            print("WARNING: No SpaceMouse found via hidraw. Action returns zeros.")
-            return
-
-        try:
-            found_dev.open()
-            found_dev.set_nonblocking(True)
-        except Exception as e:
-            print(f"WARNING: Failed to open SpaceMouse hidraw: {e}")
-            print("  Try: sudo chmod 666 /dev/hidraw*")
-            return
-
-        self._device = found_dev
-        self._bytes_to_read = 13
-
-        self._thread = threading.Thread(target=self._hidraw_loop, daemon=True)
-        self._thread.start()
-        print(f"SpaceMouse connected: {found_dev.path} (vid=0x{found_dev.vendor_id:04X} pid=0x{found_dev.product_id:04X})")
-
-    def _to_int16(self, lo, hi):
-        val = lo | (hi << 8)
-        if val >= 32768:
-            val = -(65536 - val)
-        return val
-
-    def _hidraw_loop(self):
-        while self._running:
-            try:
-                data = self._device.read(self._bytes_to_read)
-                if not data:
-                    data = self._device.read(self._bytes_to_read, timeout_ms=50)
-                if data and len(data) >= 3:
-                    channel = data[0]
-                    if channel == 1 and len(data) >= 13:
-                        self._axes[0] = self._to_int16(data[1], data[2]) / 350.0
-                        self._axes[1] = self._to_int16(data[3], data[4]) / -350.0
-                        self._axes[2] = self._to_int16(data[5], data[6]) / 350.0
-                        self._axes[3] = self._to_int16(data[7], data[8]) / -350.0
-                        self._axes[4] = self._to_int16(data[9], data[10]) / -350.0
-                        self._axes[5] = self._to_int16(data[11], data[12]) / 350.0
-                    elif channel == 3 and len(data) >= 2:
-                        btn_byte = data[1]
-                        self._buttons[0] = 1 if (btn_byte & 0x01) else 0
-                        self._buttons[1] = 1 if (btn_byte & 0x02) else 0
-            except Exception:
-                pass
-            time.sleep(0.001)
-
-    def get_state(self) -> tuple:
-        a = self._axes  # [x, y, z, pitch, roll, yaw]
-        action = [a[1], -a[0], a[2], a[3], a[4], a[5]]  # env compat: swap x<->y
-        return action, self._buttons[:]
-
-    def close(self):
-        self._running = False
-        if self._device is not None:
-            try:
-                self._device.close()
-            except Exception:
-                pass
-
 
 class ServerSpacemouseIntervention(gym.ActionWrapper):
     """Reads SpaceMouse directly via hidraw (no HTTP).
@@ -296,8 +191,8 @@ class ServerSpacemouseIntervention(gym.ActionWrapper):
 
         self.left, self.right = buttons[0], buttons[1]
 
-        # Deadman switch: hold left button to enable motion
-        if not self.left:
+        # Deadman switch: hold right button to enable motion
+        if not self.right:
             return action, False
 
         # Per-axis dead zone

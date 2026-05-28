@@ -24,6 +24,7 @@ import requests
 from scipy.spatial.transform import Rotation as R
 
 from franka_env.camera.rs_capture import RSCapture
+from franka_env.spacemouse_utils import map_spacemouse_to_delta
 
 
 class ImageDisplayer(threading.Thread):
@@ -248,13 +249,9 @@ class CR5AFEnv(gym.Env):
         state_updated = False
 
         if np.max(np.abs(action[:6])) > 1e-6:
-            dx, dy, dz, droll, dpitch, dyaw = action[:6]
-            xyz_delta_m = np.array([
-                -dx * self.action_scale[0],
-                -dy * self.action_scale[0],
-                -dz * self.action_scale[0],
-            ])
-            rot_delta = np.array([dpitch, droll, dyaw]) * self.action_scale[1]
+            xyz_d, rot_d = map_spacemouse_to_delta(action, self.action_scale[0], self.action_scale[1])
+            xyz_delta_m = np.array(xyz_d)
+            rot_delta = np.array(rot_d)
 
             xyz_delta_m = np.clip(xyz_delta_m, -self.max_translation_delta, self.max_translation_delta)
             rot_delta = np.clip(rot_delta, -self.max_rotation_delta, self.max_rotation_delta)
