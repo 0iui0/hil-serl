@@ -52,8 +52,8 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     TARGET_POSE = np.array([0.7300, -0.1370, 0.0895, 178.28, -3.44, -90.0])
     REWARD_THRESHOLD = np.array([0.005, 0.005, 0.005, 2.0, 2.0, 2.0])
     ACTION_SCALE = (0.003, 0.05, 1)
-    ABS_POSE_LIMIT_LOW = np.array([0.400, -0.300, 0.100, -180, -90, -180])
-    ABS_POSE_LIMIT_HIGH = np.array([0.800, 0.000, 0.500, 180, 90, 180])
+    ABS_POSE_LIMIT_LOW = np.array([0.600, -0.250, 0.086, -180, -90, -180])
+    ABS_POSE_LIMIT_HIGH = np.array([0.850, -0.050, 0.160, 180, 90, 180])
 
     RANDOM_RESET = False
     RANDOM_XY_RANGE = 0.02
