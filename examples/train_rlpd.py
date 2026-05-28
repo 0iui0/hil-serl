@@ -188,10 +188,11 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                     actions = env.action_space.sample()
                 else:
                     sampling_rng, key = jax.random.split(sampling_rng)
+                    use_argmax = step < config.argmax_warmup_steps
                     actions = agent.sample_actions(
                         observations=jax.device_put(obs),
                         seed=key,
-                        argmax=False,
+                        argmax=use_argmax,
                     )
                     actions = np.asarray(jax.device_get(actions))
 

@@ -71,7 +71,7 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     USE_GRIPPER = False                 # False = fixed-flange (current), True = learned-gripper (future)
     GRASP_FORCE_THRESHOLD = 2.0         # N, minimum force to confirm grasp
     FORCE_THRESHOLD = 2.0              # N, minimum force to trigger admittance yield
-    CLASSIFIER_THRESHOLD = 0.98        # sigmoid score threshold for insertion detection
+    CLASSIFIER_THRESHOLD = 0.99        # sigmoid score threshold for insertion detection
     ADMITTANCE_GAIN = 0.0003           # m/N, position yield per Newton of contact force (EMA-filtered)
     FORCE_DANGER_THRESHOLD = 150.0     # N, emergency clamp delta to zero when |force| exceeds this
     SERVOP_GAIN = 250                  # ServoP proportional gain (default 500, 200-1000, lower=softer)
@@ -99,6 +99,7 @@ class TrainConfig(DefaultTrainingConfig):
     checkpoint_period = 5000
     steps_per_update = 50
     training_starts = 5000  # give critic enough online data before actor updates
+    argmax_warmup_steps = 20000  # use deterministic policy for first N actor steps to avoid jitter
     encoder_type = "resnet-pretrained"
     # Auto-switch training mode based on gripper availability
     setup_mode = "single-arm-learned-gripper" if EnvConfig.USE_GRIPPER else "single-arm-fixed-gripper"
