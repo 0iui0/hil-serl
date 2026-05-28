@@ -124,6 +124,13 @@ class CR5AFEnv(gym.Env):
         self.max_translation_delta = config.MAX_TRANSLATION_DELTA_MM / 1000.0  # per-axis
         self.max_rotation_delta = np.deg2rad(config.MAX_ROTATION_DELTA_DEG)
         self.min_delta = config.MIN_DELTA_MM / 1000.0
+        self.admittance_gain = getattr(config, 'ADMITTANCE_GAIN', 0.0002)
+        self.force_threshold = getattr(config, 'FORCE_THRESHOLD', 1.0)
+        self.servo_gain = getattr(config, 'SERVOP_GAIN', 250)
+        self.force_danger_threshold = getattr(config, 'FORCE_DANGER_THRESHOLD', 30.0)
+        self._force_source = "tcp"  # "tcp" or "six_force" — set when first state is read
+        self._force_ema = np.zeros(3)  # EMA-filtered force for stable admittance
+        self._force_ema_alpha = 0.3   # smoothing factor (lower = smoother)
         # Orientation constraint: clamp TCP rotation to reset pose ± this value
         self.max_orient_dev = np.deg2rad(config.MAX_ORIENTATION_DEVIATION_DEG)
         self._reset_euler = np.deg2rad(config.RESET_POSE[3:])  # target orientation in rad
@@ -212,13 +219,13 @@ class CR5AFEnv(gym.Env):
         pose[:3] = np.clip(
             pose[:3], self.xyz_bounding_box.low, self.xyz_bounding_box.high
         )
-        euler = R.from_quat(pose[3:]).as_euler("xyz")
+        euler = R.from_quat(pose[3:]).as_euler("XYZ")
         sign = np.sign(euler[0])
         euler[0] = sign * np.clip(
             np.abs(euler[0]), self.rpy_bounding_box.low[0], self.rpy_bounding_box.high[0]
         )
         euler[1:] = np.clip(euler[1:], self.rpy_bounding_box.low[1:], self.rpy_bounding_box.high[1:])
-        pose[3:] = R.from_euler("xyz", euler).as_quat()
+        pose[3:] = R.from_euler("XYZ", euler).as_quat()
 
         # Clamp orientation to reset pose ± max_orient_dev
         if self.max_orient_dev > 0:
@@ -256,10 +263,42 @@ class CR5AFEnv(gym.Env):
             xyz_delta_m = np.clip(xyz_delta_m, -self.max_translation_delta, self.max_translation_delta)
             rot_delta = np.clip(rot_delta, -self.max_rotation_delta, self.max_rotation_delta)
 
+            # Admittance control: yield to contact forces for soft impedance behavior.
+            # Reaction force from obstacle opposes robot motion.
+            # The 6-axis sensor Z sign is inverted relative to base frame, so we negate.
+            # EMA filter on force to prevent oscillation from sensor noise at contact.
+            self._force_ema = (self._force_ema_alpha * self.currforce +
+                               (1 - self._force_ema_alpha) * self._force_ema)
+            force_mag = np.linalg.norm(self._force_ema)
+            if force_mag > self.force_threshold:
+                adm_correction = -self.admittance_gain * self._force_ema
+                adm_correction = np.clip(adm_correction, -self.max_translation_delta, self.max_translation_delta)
+                xyz_delta_m += adm_correction
+                if self.curr_path_length % 10 == 0:
+                    print(f"[ADMIT] force_raw={np.round(self.currforce, 2)} "
+                          f"ema={np.round(self._force_ema, 2)} |f|={force_mag:.1f}N "
+                          f"delta_before={np.round(xyz_delta_m - adm_correction, 5)} "
+                          f"delta_after={np.round(xyz_delta_m, 5)}", flush=True)
+            elif self.curr_path_length % 50 == 0:
+                print(f"[FORCE] force_raw={np.round(self.currforce, 2)} "
+                      f"ema={np.round(self._force_ema, 2)} |f|={force_mag:.2f}N "
+                      f"delta={np.round(xyz_delta_m, 5)}", flush=True)
+
+            # Safety clamp: if filtered force exceeds danger threshold, zero out delta in force direction
+            if force_mag > self.force_danger_threshold:
+                force_dir = self._force_ema / (force_mag + 1e-8)
+                # Project delta onto force direction; if moving into force, clamp that component
+                proj = np.dot(xyz_delta_m, force_dir)
+                if proj > 0:  # moving in same direction as force = into obstacle
+                    xyz_delta_m -= proj * force_dir
+                    print(f"[SAFETY] force_ema={np.round(self._force_ema, 2)} |f|={force_mag:.1f}N "
+                          f"> threshold={self.force_danger_threshold}N, clamped delta", flush=True)
+
             if np.max(np.abs(xyz_delta_m)) >= self.min_delta or np.max(np.abs(rot_delta)) >= self.min_delta:
-                # Apply delta to TRACKED target (not RT cache), eliminating feedback oscillation
+                # Position from actual pose prevents target accumulation into obstacles.
+                # Rotation tracked for smooth interpolation.
                 self.nextpos = self._target_pos.copy()
-                self.nextpos[:3] = self.nextpos[:3] + xyz_delta_m
+                self.nextpos[:3] = self.currpos[:3] + xyz_delta_m
                 self.nextpos[3:] = (
                     R.from_rotvec(rot_delta)
                     * R.from_quat(self._target_pos[3:])
@@ -292,9 +331,9 @@ class CR5AFEnv(gym.Env):
     def compute_reward(self, obs) -> bool:
         current_pose = obs["state"]["tcp_pose"]
         current_rot = R.from_quat(current_pose[3:]).as_matrix()
-        target_rot = R.from_euler("xyz", self._TARGET_POSE[3:]).as_matrix()
+        target_rot = R.from_euler("XYZ", self._TARGET_POSE[3:]).as_matrix()
         diff_rot = current_rot.T @ target_rot
-        diff_euler = R.from_matrix(diff_rot).as_euler("xyz")
+        diff_euler = R.from_matrix(diff_rot).as_euler("XYZ")
         delta = np.abs(np.hstack([current_pose[:3] - self._TARGET_POSE[:3], diff_euler]))
         return bool(np.all(delta < self._REWARD_THRESHOLD))
 
@@ -416,6 +455,7 @@ class CR5AFEnv(gym.Env):
 
         self.last_gripper_act = time.time()
         self._post("update_param", json=self.config.COMPLIANCE_PARAM)
+        self._post("update_param", json={"servo_gain": self.servo_gain})
         if self.save_video:
             self.save_video_recording()
 
@@ -427,6 +467,8 @@ class CR5AFEnv(gym.Env):
         self._recover()
         self.go_to_reset(joint_reset=joint_reset)
         self._recover()
+        imp_resp = self._post("startimp", json=self.config.COMPLIANCE_PARAM)
+        print(f"[ENV] startimp response: {imp_resp.status_code} {imp_resp.text[:200] if imp_resp.text else 'empty'}", flush=True)
         self.curr_path_length = 0
 
         self._update_currpos()
@@ -489,17 +531,19 @@ class CR5AFEnv(gym.Env):
         self.q = np.array(ps["q"])
         self.dq = np.array(ps["dq"])
         self.curr_gripper_pos = np.array(ps["gripper_pos"])
-        sf = ps.get("six_force")
-        if sf is not None:
-            sf = np.array(sf)
-            if sf.shape == (6,):
-                self.currforce = sf[:3]
-                self.currtorque = sf[3:6]
-
         sf_online = ps.get("six_force_online")
         if sf_online is not None and not hasattr(self, '_sf_online_printed'):
             self._sf_online_printed = True
-            print(f"SixForceOnline: {sf_online}")
+            print(f"[ENV] SixForceOnline: {sf_online}")
+
+        if sf_online:
+            sf = ps.get("six_force")
+            if sf is not None:
+                sf = np.array(sf)
+                if sf.shape == (6,):
+                    self.currforce = sf[:3]
+                    self.currtorque = sf[3:6]
+                    self._force_source = "six_force"
 
         return ps
 
@@ -558,13 +602,16 @@ class CR5AFEnv(gym.Env):
         self.dq = np.array(ps["dq"])
         self.curr_gripper_pos = np.array(ps["gripper_pos"])
 
-        # Prefer 6-axis force sensor data when available
-        six_force = ps.get("six_force")
-        if six_force is not None:
-            sf = np.array(six_force)
-            if sf.shape == (6,):
-                self.currforce = sf[:3]
-                self.currtorque = sf[3:6]
+        # Only use 6-axis force sensor data when sensor is online
+        sf_online = ps.get("six_force_online")
+        if sf_online:
+            six_force = ps.get("six_force")
+            if six_force is not None:
+                sf = np.array(six_force)
+                if sf.shape == (6,):
+                    self.currforce = sf[:3]
+                    self.currtorque = sf[3:6]
+                    self._force_source = "six_force"
 
     def _get_obs(self) -> dict:
         images = self.get_im()

@@ -53,14 +53,14 @@ CAMERAS = {
         "dim": (640, 480),
         "exposure": 40000,
         "fps": 30,
-        "crop": lambda img: img[158:418, 234:500],
+        "crop": lambda img: img[46:411, 197:493],
     },
     "wrist": {
         "serial_number": "352122272331",
         "dim": (640, 480),
         "exposure": 40000,
         "fps": 30,
-        "crop": lambda img: img[111:364, 101:387],
+        "crop": lambda img: img[132:479, 229:640],
     },
 }
 

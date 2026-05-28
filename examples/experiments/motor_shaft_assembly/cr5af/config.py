@@ -70,14 +70,20 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     # Gripper mode switch
     USE_GRIPPER = False                 # False = fixed-flange (current), True = learned-gripper (future)
     GRASP_FORCE_THRESHOLD = 2.0         # N, minimum force to confirm grasp
-    FORCE_THRESHOLD = 1.0              # N, |fz| threshold for insertion success
-    CLASSIFIER_THRESHOLD = 0.9         # sigmoid score threshold for insertion detection
+    FORCE_THRESHOLD = 2.0              # N, minimum force to trigger admittance yield
+    CLASSIFIER_THRESHOLD = 0.98        # sigmoid score threshold for insertion detection
+    ADMITTANCE_GAIN = 0.0003           # m/N, position yield per Newton of contact force (EMA-filtered)
+    FORCE_DANGER_THRESHOLD = 150.0     # N, emergency clamp delta to zero when |force| exceeds this
+    SERVOP_GAIN = 250                  # ServoP proportional gain (default 500, 200-1000, lower=softer)
 
-    # FC impedance params (CR5AF FC mode stiffness/damping)
-    # Higher damping prevents oscillation; moderate stiffness tracks SpaceMouse crisply
+    # FC impedance params (matching forge_policy: Z-only force control)
+    # XY stays position-controlled via ServoP, Z is force-controlled with target force
     COMPLIANCE_PARAM = {
-        "stiffness": [400, 400, 400, 60, 60, 60],
-        "damping": [120, 120, 120, 25, 25, 25],
+        "stiffness": [30, 30, 1000, 30, 30, 30],
+        "damping": [50, 50, 800, 50, 50, 50],
+        "mass": [150, 150, 150, 150, 150, 150],
+        "force_speed_limit": [20, 20, 20, 20, 20, 20],
+        "target_force": 4,
     }
     PRECISION_PARAM = {
         "stiffness": [2000, 2000, 2000, 200, 200, 200],
@@ -92,6 +98,7 @@ class TrainConfig(DefaultTrainingConfig):
     buffer_period = 1000
     checkpoint_period = 5000
     steps_per_update = 50
+    training_starts = 5000  # give critic enough online data before actor updates
     encoder_type = "resnet-pretrained"
     # Auto-switch training mode based on gripper availability
     setup_mode = "single-arm-learned-gripper" if EnvConfig.USE_GRIPPER else "single-arm-fixed-gripper"
@@ -132,7 +139,8 @@ class TrainConfig(DefaultTrainingConfig):
 
             def reward_func(obs):
                 sigmoid = lambda x: 1 / (1 + jnp.exp(-x))
-                return int(sigmoid(classifier(obs)) > env_config.CLASSIFIER_THRESHOLD)
+                prob = float(sigmoid(classifier(obs)).ravel()[0])
+                return int(prob > env_config.CLASSIFIER_THRESHOLD)
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
 

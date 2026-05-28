@@ -100,9 +100,9 @@ class MotorShaftEnv(CR5AFEnv):
         current_rot = current_pose[3:]
         from scipy.spatial.transform import Rotation as R
         current_rot = R.from_quat(current_rot).as_matrix()
-        target_rot = R.from_euler("xyz", self._TARGET_POSE[3:]).as_matrix()
+        target_rot = R.from_euler("XYZ", self._TARGET_POSE[3:]).as_matrix()
         diff_rot = current_rot.T @ target_rot
-        diff_euler = R.from_matrix(diff_rot).as_euler("xyz")
+        diff_euler = R.from_matrix(diff_rot).as_euler("XYZ")
         delta = np.abs(np.hstack([current_pose[:3] - self._TARGET_POSE[:3], diff_euler]))
 
         pose_ok = np.all(delta < self._REWARD_THRESHOLD)

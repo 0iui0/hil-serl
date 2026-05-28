@@ -134,6 +134,8 @@ class CR5AFServer:
         self.speed_pct = speed
         self.accel_pct = accel
 
+        self.servo_gain = 250  # lower = softer (default 500, range 200-1000)
+
         # State cache (SI units: position in meters, rotation in radians)
         self.lock = threading.Lock()
         self.pos = np.zeros(7)
@@ -285,8 +287,9 @@ class CR5AFServer:
     def servop(self, x_mm: float, y_mm: float, z_mm: float,
                rx_deg: float, ry_deg: float, rz_deg: float):
         """Send ServoP (interruptible Cartesian servo, fire-and-forget)."""
-        cmd = f"ServoP({x_mm:.3f},{y_mm:.3f},{z_mm:.3f},{rx_deg:.3f},{ry_deg:.3f},{rz_deg:.3f})"
-        print(f"[ServoP] x={x_mm:.1f} y={y_mm:.1f} z={z_mm:.1f} "
+        g = getattr(self, 'servo_gain', 250)
+        cmd = f"ServoP({x_mm:.3f},{y_mm:.3f},{z_mm:.3f},{rx_deg:.3f},{ry_deg:.3f},{rz_deg:.3f},gain={g})"
+        print(f"[ServoP gain={g}] x={x_mm:.1f} y={y_mm:.1f} z={z_mm:.1f} "
               f"rx={rx_deg:.2f} ry={ry_deg:.2f} rz={rz_deg:.2f}")
         with self._cmd_lock:
             try:
@@ -751,20 +754,47 @@ def main(argv):
 
     @webapp.route("/startimp", methods=["POST"])
     def start_impedance():
+        """Start Z-axis force control (matching forge_policy approach).
+
+        FCForceMode on Z-axis only with target insertion force.
+        XY stays in position control (ServoP), Z is force-controlled.
+        """
         err = _require_not_safe()
         if err:
             return err
         body = request.json or {}
 
-        stiffness = body.get("stiffness", [500, 500, 500, 30, 30, 30])
-        damping = body.get("damping", [10, 10, 10, 1, 1, 1])
-        server.fc_set_stiffness(stiffness)
-        server.fc_set_damping(damping)
+        print("[IMP] ======== STARTIMP CALLED ========", flush=True)
 
-        directions = [1, 1, 1, 1, 1, 1]
-        target_forces = [0, 0, 0, 0, 0, 0]
-        resp = server.fc_force_mode(directions, target_forces)
-        return jsonify({"fc_mode": resp})
+        # Zero force sensor first
+        print("[IMP] SixForceHome...", flush=True)
+        resp_home = server.six_force_home()
+        print(f"[IMP] SixForceHome response: {resp_home}", flush=True)
+        time.sleep(0.3)
+
+        # Z-only force control with target force
+        target_force = body.get("target_force", 4)
+        directions = [0, 0, 1, 0, 0, 0]   # Z-axis only
+        target_forces = [0, 0, target_force, 0, 0, 0]
+        print(f"[IMP] FCForceMode dir={directions} force={target_forces} reference=0", flush=True)
+        resp = server.fc_force_mode(directions, target_forces, reference=0)
+        print(f"[IMP] FCForceMode response: {resp}", flush=True)
+
+        # Set impedance params
+        stiffness = body.get("stiffness", [30, 30, 1000, 30, 30, 30])
+        damping = body.get("damping", [50, 50, 800, 50, 50, 50])
+        mass = body.get("mass", [150, 150, 150, 150, 150, 150])
+        speed_limit = body.get("force_speed_limit", [20, 20, 20, 20, 20, 20])
+
+        print(f"[IMP] stiffness={stiffness} damping={damping} mass={mass} speed_limit={speed_limit}", flush=True)
+        r1 = server.fc_set_stiffness(stiffness)
+        r2 = server.fc_set_damping(damping)
+        r3 = server.fc_set_mass(mass)
+        r4 = server.fc_set_force_speed_limit(speed_limit)
+        print(f"[IMP] stiffness_resp={r1} damping_resp={r2} mass_resp={r3} speed_resp={r4}", flush=True)
+
+        print("[IMP] ======== STARTIMP DONE ========", flush=True)
+        return jsonify({"fc_mode": resp, "home": resp_home})
 
     @webapp.route("/stopimp", methods=["POST"])
     def stop_impedance():
@@ -791,6 +821,9 @@ def main(argv):
             results["force_limit"] = server.fc_set_force_limit(body["force_limit"])
         if "target_forces" in body:
             results["target_force"] = server.fc_set_force(body["target_forces"])
+        if "servo_gain" in body:
+            server.servo_gain = int(body["servo_gain"])
+            results["servo_gain"] = server.servo_gain
         return jsonify(results) if results else "No params updated"
 
     @webapp.route("/geterror", methods=["POST"])
