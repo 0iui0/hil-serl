@@ -619,13 +619,13 @@ class CR5AFServer:
                     time.sleep(dt)
                     continue
 
-                dx, dy, dz, dpitch, droll, dyaw = action[:6]
+                dx, dy, dz, droll, dpitch, dyaw = action[:6]
                 delta = np.array([
-                    -dx * self._teleop_action_scale,
-                    -dy * self._teleop_action_scale,
+                    dx * self._teleop_action_scale,
+                    dy * self._teleop_action_scale,
                     -dz * self._teleop_action_scale,
                     -dpitch * self._teleop_rot_scale,
-                    -droll * self._teleop_rot_scale,
+                    droll * self._teleop_rot_scale,
                     -dyaw * self._teleop_rot_scale,
                 ])
 

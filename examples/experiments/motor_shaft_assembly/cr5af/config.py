@@ -34,22 +34,22 @@ class EnvConfig(DefaultCR5AFEnvConfig):
             "fps": 30,
         },
         "wrist": {
-            "serial_number": "246322300995",  # D455 #2 (new)
+            "serial_number": "352122272331",  # D405 wrist
             "dim": (640, 480),
             "exposure": 40000,
             "fps": 30,
         },
     }
     IMAGE_CROP = {
-        "external": lambda img: img[29:282, 259:454],
-        "wrist": lambda img: img[50:315, 160:395],
+        "external": lambda img: img[46:411, 197:493],
+        "wrist": lambda img: img[132:479, 229:640],
     }
 
     # Calibrated 2025-05-18 with CR5AF
     # Units: XYZ in meters, rotation in degrees
-    RESET_POSE = np.array([0.700, -0.145, 0.160, 180, 0, 0])
+    RESET_POSE = np.array([0.7300, -0.1370, 0.1400, 178.28, -3.44, -90.00])
     GRASP_POSE = np.array([0.7000, -0.1750, 0.2000, -180.00, -0.00, 0.00])
-    TARGET_POSE = np.array([0.7238, -0.1284, 0.1191, 180, 0, 0])
+    TARGET_POSE = np.array([0.7300, -0.1370, 0.0895, 178.28, -3.44, -90.0])
     REWARD_THRESHOLD = np.array([0.005, 0.005, 0.005, 2.0, 2.0, 2.0])
     ACTION_SCALE = (0.003, 0.05, 1)
     ABS_POSE_LIMIT_LOW = np.array([0.400, -0.300, 0.100, -180, -90, -180])

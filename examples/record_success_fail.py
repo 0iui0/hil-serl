@@ -37,7 +37,7 @@ def main(_):
     print("CR5AF Reward Classifier Data Collection")
     print("=" * 60)
     print("Controls:")
-    print("  s + Enter  -> Mark success for current frame")
+    print("  Auto-label: pose within threshold = success, otherwise = failure")
     print("  q + Enter  -> Quit and save")
     print("  Ctrl+C     -> Quit and save")
     print("=" * 60)
@@ -45,8 +45,7 @@ def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=False, save_video=False,
-                                 classifier=False, server_url=FLAGS.server_url,
-                                 server_teleop=True)
+                                 classifier=False, server_url=FLAGS.server_url)
 
     obs, _ = env.reset()
     successes = []
@@ -54,7 +53,6 @@ def main(_):
     success_needed = FLAGS.successes_needed
     save_every = FLAGS.save_every
     pbar = tqdm(total=success_needed)
-    mark_success = False
 
     def on_exit(sig=None, frame=None):
         print(f"\nInterrupted. Saving {len(successes)} success + {len(failures)} failure...")
@@ -65,12 +63,9 @@ def main(_):
     signal.signal(signal.SIGINT, on_exit)
 
     while len(successes) < success_needed:
-        # Non-blocking stdin check (same pattern as collect_reward_data.py)
         if select.select([sys.stdin], [], [], 0)[0]:
             cmd = sys.stdin.readline().strip().lower()
-            if cmd == 's':
-                mark_success = True
-            elif cmd == 'q':
+            if cmd == 'q':
                 print("Quit requested.")
                 break
 
@@ -90,11 +85,11 @@ def main(_):
             )
         )
         obs = next_obs
-        if mark_success:
+
+        # Auto-label: rew=1 means pose within threshold → success
+        if rew > 0:
             successes.append(transition)
             pbar.update(1)
-            mark_success = False
-            print(f"\n[s] success #{len(successes)} recorded")
             if len(successes) % save_every == 0:
                 save_data(successes, failures, success_needed)
         else:

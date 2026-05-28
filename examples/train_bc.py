@@ -73,7 +73,8 @@ def eval(
             rng, key = jax.random.split(sampling_rng)
 
             actions = bc_agent.sample_actions(observations=obs, seed=key)
-            actions = np.asarray(jax.device_get(actions))
+            actions = np.array(np.asarray(jax.device_get(actions)), dtype=np.float64)
+            actions[3:6] = np.clip(actions[3:6], -0.03, 0.03)
             next_obs, reward, done, truncated, info = env.step(actions)
             obs = next_obs
             if done:

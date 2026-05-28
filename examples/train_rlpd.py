@@ -98,7 +98,9 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                     argmax=False,
                     seed=key
                 )
-                actions = np.asarray(jax.device_get(actions))
+                actions = np.array(np.asarray(jax.device_get(actions)), dtype=np.float64)
+                actions[:3] = np.clip(actions[:3], -0.15, 0.15)
+                actions[3:6] = np.clip(actions[3:6], -0.01, 0.01)
 
                 next_obs, reward, done, truncated, info = env.step(actions)
                 obs = next_obs
@@ -139,14 +141,20 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
     )
 
     # Function to update the agent with new params
+    param_update_counter = [0]  # mutable counter for closure
+
     def update_params(params):
         nonlocal agent
         agent = agent.replace(state=agent.state.replace(params=params))
+        param_update_counter[0] += 1
+        if param_update_counter[0] % 100 == 1:
+            print(f"[PARAM] received learner params #{param_update_counter[0]}")
 
     client.recv_network_callback(update_params)
 
     transitions = []
     demo_transitions = []
+    episode_intvn = []  # accumulate intervention transitions per episode
 
     obs, _ = env.reset()
     done = False
@@ -158,106 +166,162 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
     intervention_count = 0
     intervention_steps = 0
 
-    pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
-    for step in pbar:
-        timer.tick("total")
-
-        with timer.context("sample_actions"):
-            if step < config.random_steps:
-                actions = env.action_space.sample()
-            else:
-                sampling_rng, key = jax.random.split(sampling_rng)
-                use_argmax = step < 500  # deterministic BC policy for first 500 steps
-                actions = agent.sample_actions(
-                    observations=jax.device_put(obs),
-                    seed=key,
-                    argmax=use_argmax,
-                )
-                actions = np.asarray(jax.device_get(actions))
-                if step < 50 or step % 200 == 0:
-                    actions_argmax = agent.sample_actions(
-                        observations=jax.device_put(obs),
-                        seed=key,
-                        argmax=True,
-                    )
-                    actions_argmax = np.asarray(jax.device_get(actions_argmax))
-                    print(f"[POLICY step={step}] sample={np.round(actions, 3)} argmax={np.round(actions_argmax, 3)}")
-
-        # Step environment
-        with timer.context("step_env"):
-
-            next_obs, reward, done, truncated, info = env.step(actions)
-            if "left" in info:
-                info.pop("left")
-            if "right" in info:
-                info.pop("right")
-
-            # override the action with the intervention action
-            if "intervene_action" in info:
-                actions = info.pop("intervene_action")
-                intervention_steps += 1
-                if not already_intervened:
-                    intervention_count += 1
-                already_intervened = True
-            else:
-                already_intervened = False
-
-            running_return += reward
-            transition = dict(
-                observations=obs,
-                actions=actions,
-                next_observations=next_obs,
-                rewards=reward,
-                masks=1.0 - done,
-                dones=done,
-            )
-            if 'grasp_penalty' in info:
-                transition['grasp_penalty']= info['grasp_penalty']
-            data_store.insert(transition)
-            transitions.append(copy.deepcopy(transition))
-            if already_intervened:
-                intvn_data_store.insert(transition)
-                demo_transitions.append(copy.deepcopy(transition))
-
-            obs = next_obs
-            if done or truncated:
-                info["episode"]["intervention_count"] = intervention_count
-                info["episode"]["intervention_steps"] = intervention_steps
-                stats = {"environment": info}  # send stats to the learner to log
-                client.request("send-stats", stats)
-                pbar.set_description(f"last return: {running_return}")
-                running_return = 0.0
-                intervention_count = 0
-                intervention_steps = 0
-                already_intervened = False
-                client.update()
-                obs, _ = env.reset()
-
-        if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
-            # dump to pickle file
-            buffer_path = os.path.join(FLAGS.checkpoint_path, "buffer")
-            demo_buffer_path = os.path.join(FLAGS.checkpoint_path, "demo_buffer")
-            if not os.path.exists(buffer_path):
-                os.makedirs(buffer_path)
-            if not os.path.exists(demo_buffer_path):
-                os.makedirs(demo_buffer_path)
+    def _save_pending_transitions(step, transitions, demo_transitions):
+        """Flush unsaved transitions to disk so they survive a restart."""
+        if not transitions and not demo_transitions:
+            return
+        buffer_path = os.path.join(FLAGS.checkpoint_path, "buffer")
+        demo_buffer_path = os.path.join(FLAGS.checkpoint_path, "demo_buffer")
+        os.makedirs(buffer_path, exist_ok=True)
+        os.makedirs(demo_buffer_path, exist_ok=True)
+        # pickle is used consistently throughout this codebase for transition storage
+        if transitions:
             with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
                 pkl.dump(transitions, f)
-                transitions = []
-            with open(
-                os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
-            ) as f:
+        if demo_transitions:
+            with open(os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb") as f:
                 pkl.dump(demo_transitions, f)
-                demo_transitions = []
 
-        timer.tock("total")
+    pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
+    try:
+        for step in pbar:
+            timer.tick("total")
 
-        if step % 10 == 0:
-            client.update()
+            with timer.context("sample_actions"):
+                if step < config.random_steps:
+                    actions = env.action_space.sample()
+                else:
+                    sampling_rng, key = jax.random.split(sampling_rng)
+                    use_argmax = step < 500  # deterministic BC policy for first 500 steps
+                    actions = agent.sample_actions(
+                        observations=jax.device_put(obs),
+                        seed=key,
+                        argmax=use_argmax,
+                    )
+                    actions = np.array(np.asarray(jax.device_get(actions)), dtype=np.float64)
+                    actions[:3] = np.clip(actions[:3], -0.15, 0.15)
+                    actions[3:6] = np.clip(actions[3:6], -0.01, 0.01)
+                    if step < 50 or step % 200 == 0:
+                        actions_argmax = agent.sample_actions(
+                            observations=jax.device_put(obs),
+                            seed=key,
+                            argmax=True,
+                        )
+                        actions_argmax = np.asarray(jax.device_get(actions_argmax))
+                        print(f"[POLICY step={step}] sample={np.round(actions, 3)} argmax={np.round(actions_argmax, 3)}")
 
-        if step % config.log_period == 0:
-            stats = {"timer": timer.get_average_times()}
-            client.request("send-stats", stats)
+            # Step environment
+            with timer.context("step_env"):
+
+                next_obs, reward, done, truncated, info = env.step(actions)
+                if "left" in info:
+                    info.pop("left")
+                if "right" in info:
+                    info.pop("right")
+
+                # When human intervenes, the wrapper executed the human's action
+                # instead of the policy's. Save both for correct buffer placement.
+                if "intervene_action" in info:
+                    human_action = info.pop("intervene_action")
+                    policy_action = actions.copy()  # what the policy wanted to do
+                    intervention_steps += 1
+                    if not already_intervened:
+                        intervention_count += 1
+                    already_intervened = True
+                else:
+                    human_action = None
+                    policy_action = actions  # policy action WAS executed
+                    already_intervened = False
+
+                running_return += reward
+                transition = dict(
+                    observations=obs,
+                    actions=policy_action,
+                    next_observations=next_obs,
+                    rewards=reward,
+                    masks=1.0 - done,
+                    dones=done,
+                )
+                if 'grasp_penalty' in info:
+                    transition['grasp_penalty'] = info['grasp_penalty']
+                # Only insert into RL buffer when the policy's action was actually
+                # executed. When human intervened, next_obs = f(s, a_human), not
+                # f(s, a_policy), so the transition would be physically inconsistent
+                # and corrupt the Q-function.
+                if not already_intervened:
+                    data_store.insert(transition)
+                transitions.append(copy.deepcopy(transition))
+                # Demo buffer: human correction (ground truth example)
+                if already_intervened and human_action is not None:
+                    intvn_transition = copy.deepcopy(transition)
+                    intvn_transition["actions"] = human_action
+                    episode_intvn.append(intvn_transition)
+
+                obs = next_obs
+                if done or truncated:
+                    # Only commit intervention data to demo buffer on success
+                    if reward > 0 and episode_intvn:
+                        for t in episode_intvn:
+                            intvn_data_store.insert(t)
+                            demo_transitions.append(t)
+                        print(f"[DEMO] +{len(episode_intvn)} intervention transitions from SUCCESS episode")
+                    elif episode_intvn:
+                        print(f"[DEMO] discarded {len(episode_intvn)} intervention transitions from FAILED episode")
+                    episode_intvn = []
+
+                    info["episode"]["intervention_count"] = intervention_count
+                    info["episode"]["intervention_steps"] = intervention_steps
+                    stats = {"environment": info}  # send stats to the learner to log
+                    client.request("send-stats", stats)
+                    pbar.set_description(f"last return: {running_return}")
+                    running_return = 0.0
+                    intervention_count = 0
+                    intervention_steps = 0
+                    already_intervened = False
+                    uok = client.update()
+                    ids = client.get_server_last_update_id("actor_env_intvn")
+                    print(f"[SYNC] episode end: update={uok} intvn_srv_id={ids} "
+                          f"intvn_local={intvn_data_store.latest_data_id()} "
+                          f"env_local={data_store.latest_data_id()}")
+                    obs, _ = env.reset()
+
+            if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
+                # dump to pickle file
+                buffer_path = os.path.join(FLAGS.checkpoint_path, "buffer")
+                demo_buffer_path = os.path.join(FLAGS.checkpoint_path, "demo_buffer")
+                if not os.path.exists(buffer_path):
+                    os.makedirs(buffer_path)
+                if not os.path.exists(demo_buffer_path):
+                    os.makedirs(demo_buffer_path)
+                with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
+                    pkl.dump(transitions, f)
+                    transitions = []
+                with open(
+                    os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
+                ) as f:
+                    pkl.dump(demo_transitions, f)
+                    demo_transitions = []
+
+            timer.tock("total")
+
+            if step % 10 == 0:
+                uok = client.update()
+                ids = client.get_server_last_update_id("actor_env_intvn")
+                if step % 100 == 0:
+                    print(f"[SYNC] step={step}: update={uok} intvn_srv_id={ids} "
+                          f"intvn_local={intvn_data_store.latest_data_id()} "
+                          f"env_local={data_store.latest_data_id()}")
+
+            if step % config.log_period == 0:
+                stats = {"timer": timer.get_average_times()}
+                client.request("send-stats", stats)
+
+    except KeyboardInterrupt:
+        # Ctrl+C: save unsaved transitions and exit cleanly
+        _save_pending_transitions(step, transitions, demo_transitions)
+        print(f"\n[PAUSED] Actor stopped at step {step}. "
+              f"Saved {len(transitions)} online + {len(demo_transitions)} demo transitions.")
+        print("[PAUSED] Learner is still running. Restart this actor to resume.")
 
 
 ##############################################################################
@@ -267,10 +331,10 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
     """
     The learner loop, which runs when "--learner" is set to True.
     """
+    latest = checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path))
     start_step = (
-        int(os.path.basename(checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path)))[11:])
-        + 1
-        if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
+        int(os.path.basename(latest)[11:]) + 1
+        if latest is not None
         else 0
     )
     step = start_step
