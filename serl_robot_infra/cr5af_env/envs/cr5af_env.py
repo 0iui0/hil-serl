@@ -28,23 +28,99 @@ from franka_env.spacemouse_utils import map_spacemouse_to_delta
 
 
 class ImageDisplayer(threading.Thread):
-    def __init__(self, queue, name):
+    def __init__(self, queue, name, enable_recording=True):
         threading.Thread.__init__(self)
         self.queue = queue
         self.daemon = True
         self.name = name
+        self.enable_recording = enable_recording
+
+        # Recording state
+        self.recording = False
+        self.paused = False
+        self.writer: cv2.VideoWriter | None = None
+        self._record_start_time: datetime | None = None
+        self._record_path: str = ""
+
+    def _start_recording(self, frame):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.makedirs("recordings", exist_ok=True)
+        h, w = frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        path = os.path.join("recordings", f"combined_{ts}.mp4")
+        self.writer = cv2.VideoWriter(path, fourcc, 30, (w, h))
+        self._record_path = path
+        print(f"[RECORD] started: {path}")
+        self.recording = True
+        self.paused = False
+        self._record_start_time = datetime.now()
+
+    def _stop_recording(self):
+        if self.writer is not None:
+            self.writer.release()
+            print(f"[RECORD] saved: {self._record_path}")
+            self.writer = None
+        self.recording = False
+        self.paused = False
+        self._record_start_time = None
+
+    def _draw_status(self, frame):
+        """Draw recording status indicator (colored circle) on frame."""
+        h, w = frame.shape[:2]
+        if self.recording and not self.paused:
+            color = (0, 255, 0)  # green = recording
+            label = "REC"
+        elif self.recording and self.paused:
+            color = (0, 255, 255)  # yellow = paused
+            label = "PAUSE"
+        else:
+            color = (0, 0, 255)  # red = idle
+            label = "IDLE"
+        r = 12
+        margin = 16
+        center = (w - margin - r, margin + r)
+        cv2.circle(frame, center, r, color, -1)
+        cv2.circle(frame, center, r, (255, 255, 255), 1)
+        text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0]
+        text_x = center[0] - r - text_size[0] - 6
+        text_y = center[1] + text_size[1] // 2
+        cv2.putText(frame, label, (text_x, text_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        # Show elapsed time when recording
+        if self.recording and self._record_start_time:
+            elapsed = (datetime.now() - self._record_start_time).seconds
+            time_str = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
+            (tw, th), _ = cv2.getTextSize(time_str, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.putText(frame, time_str, (w - tw - margin, margin + r + th + 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
     def run(self):
         cv2.namedWindow(self.name, cv2.WINDOW_NORMAL)
+        if self.enable_recording:
+            print("[RECORD] Keys: R=start  P=pause/resume  S=stop & save")
         first = True
         while True:
+            key = cv2.waitKey(10) & 0xFF
+            if self.enable_recording:
+                if key == ord("r"):
+                    self._pending_start = True
+                elif key == ord("p"):
+                    if self.recording:
+                        self.paused = not self.paused
+                        state = "paused" if self.paused else "resumed"
+                        print(f"[RECORD] {state}")
+                elif key == ord("s"):
+                    if self.recording:
+                        self._stop_recording()
+
             try:
                 img_array = self.queue.get(timeout=0.05)
             except queue.Empty:
-                cv2.waitKey(10)
                 continue
+
             if img_array is None:
                 break
+
             panels = []
             for k, v in img_array.items():
                 if "full" in k:
@@ -61,11 +137,23 @@ class ImageDisplayer(threading.Thread):
                     p = np.concatenate([p, pad], axis=0)
                 padded.append(p)
             frame = np.concatenate(padded, axis=1)
+
+            # Handle deferred start (need combined frame dimensions)
+            if getattr(self, "_pending_start", False):
+                self._pending_start = False
+                if not self.recording:
+                    self._start_recording(frame)
+
+            # Write combined frame (matching GUI layout) to video
+            if self.recording and not self.paused and self.writer is not None:
+                self.writer.write(frame)
+
+            if self.enable_recording:
+                self._draw_status(frame)
             cv2.imshow(self.name, frame)
             if first:
                 cv2.resizeWindow(self.name, frame.shape[1], frame.shape[0])
                 first = False
-            cv2.waitKey(10)
 
 
 class DefaultCR5AFEnvConfig:
