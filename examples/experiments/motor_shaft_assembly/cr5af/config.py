@@ -52,11 +52,12 @@ class EnvConfig(DefaultCR5AFEnvConfig):
     TARGET_POSE = np.array([0.7300, -0.1370, 0.0895, 178.28, -3.44, -90.0])
     REWARD_THRESHOLD = np.array([0.005, 0.005, 0.005, 2.0, 2.0, 2.0])
     ACTION_SCALE = (0.003, 0.05, 1)
-    ABS_POSE_LIMIT_LOW = np.array([0.600, -0.250, 0.086, -180, -90, -180])
+    ABS_POSE_LIMIT_LOW = np.array([0.600, -0.250, 0.080, -180, -90, -180])
     ABS_POSE_LIMIT_HIGH = np.array([0.850, -0.050, 0.160, 180, 90, 180])
 
-    RANDOM_RESET = False
-    RANDOM_XY_RANGE = 0.02
+    RANDOM_RESET = True
+    RANDOM_XY_RANGE = 0.03
+    RANDOM_Z_RANGE = (0.005, 0.018)
     RANDOM_RZ_RANGE = 0.05
     DISPLAY_IMAGE = True
     MAX_EPISODE_LENGTH = 200            # 8s at 25Hz (aligned with Franka ~6-10s)
@@ -99,6 +100,7 @@ class TrainConfig(DefaultTrainingConfig):
     checkpoint_period = 5000
     steps_per_update = 50
     training_starts = 5000  # give critic enough online data before actor updates
+    max_steps = 2000000
     argmax_warmup_steps = 20000  # use deterministic policy for first N actor steps to avoid jitter
     action_ema_alpha = 0.5  # EMA smoothing on policy actions (0=no smoothing, 1=no effect)
     encoder_type = "resnet-pretrained"

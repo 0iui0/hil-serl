@@ -236,6 +236,7 @@ class CR5AFEnv(gym.Env):
         self.lastsent = time.time()
         self.randomreset = config.RANDOM_RESET
         self.random_xy_range = config.RANDOM_XY_RANGE
+        self.random_z_range = getattr(config, "RANDOM_Z_RANGE", None)
         self.random_rz_range = config.RANDOM_RZ_RANGE
         self.hz = hz
         self.joint_reset_cycle = config.JOINT_RESET_PERIOD
@@ -522,6 +523,8 @@ class CR5AFEnv(gym.Env):
             reset_pose[:2] += np.random.uniform(
                 -self.random_xy_range, self.random_xy_range, (2,)
             )
+            if self.random_z_range is not None:
+                reset_pose[2] += np.random.uniform(*self.random_z_range)
             euler_random = self._RESET_POSE[3:].copy()
             euler_random[-1] += np.random.uniform(
                 -self.random_rz_range, self.random_rz_range
@@ -529,6 +532,11 @@ class CR5AFEnv(gym.Env):
             reset_pose[3:] = R.from_euler("XYZ", euler_random, degrees=True).as_quat()
         else:
             reset_pose = self.resetpos.copy()
+
+        # Clip to XYZ bounding box (randomization may exceed limits)
+        reset_pose[:3] = np.clip(
+            reset_pose[:3], self.xyz_bounding_box.low, self.xyz_bounding_box.high
+        )
 
         # Move to reset pose via ServoP interpolate_move
         self.interpolate_move(reset_pose, timeout=4.0)
