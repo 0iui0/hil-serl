@@ -100,6 +100,7 @@ class TrainConfig(DefaultTrainingConfig):
     steps_per_update = 50
     training_starts = 5000  # give critic enough online data before actor updates
     argmax_warmup_steps = 20000  # use deterministic policy for first N actor steps to avoid jitter
+    action_ema_alpha = 0.5  # EMA smoothing on policy actions (0=no smoothing, 1=no effect)
     encoder_type = "resnet-pretrained"
     # Auto-switch training mode based on gripper availability
     setup_mode = "single-arm-learned-gripper" if EnvConfig.USE_GRIPPER else "single-arm-fixed-gripper"

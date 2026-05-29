@@ -178,6 +178,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
             with open(os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb") as f:
                 pkl.dump(demo_transitions, f)
 
+    prev_actions = None  # for EMA smoothing
     pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
     try:
         for step in pbar:
@@ -196,6 +197,11 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                     )
                     actions = np.asarray(jax.device_get(actions))
 
+            # EMA smoothing on policy actions to reduce jitter
+            if prev_actions is not None:
+                actions = config.action_ema_alpha * actions + (1 - config.action_ema_alpha) * prev_actions
+            prev_actions = actions.copy()
+
             # Step environment
             with timer.context("step_env"):
 
@@ -208,6 +214,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                 # override the action with the intervention action
                 if "intervene_action" in info:
                     actions = info.pop("intervene_action")
+                    prev_actions = actions.copy()
                     intervention_steps += 1
                     if not already_intervened:
                         intervention_count += 1
