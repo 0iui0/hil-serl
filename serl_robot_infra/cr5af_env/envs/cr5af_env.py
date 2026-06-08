@@ -28,12 +28,15 @@ from franka_env.spacemouse_utils import map_spacemouse_to_delta
 
 
 class ImageDisplayer(threading.Thread):
-    def __init__(self, queue, name, enable_recording=True):
+    def __init__(self, queue, name, enable_recording=True,
+                 uncertainty_threshold=1.0):
         threading.Thread.__init__(self)
         self.queue = queue
         self.daemon = True
         self.name = name
         self.enable_recording = enable_recording
+        self.uncertainty_threshold = uncertainty_threshold
+        self._latest_uncertainty = None  # (q_mean, q_std) or None
 
         # Recording state
         self.recording = False
@@ -63,6 +66,58 @@ class ImageDisplayer(threading.Thread):
         self.recording = False
         self.paused = False
         self._record_start_time = None
+
+    def _draw_uncertainty_bar(self, frame, uncertainty, threshold):
+        """Draw Q-uncertainty indicator bar: green→red gradient, flash red above threshold.
+
+        Args:
+            frame: BGR numpy array
+            uncertainty: float, current Q ensemble std (0.0 = certain, higher = uncertain)
+            threshold: float, intervention threshold for flashing
+        """
+        h, w = frame.shape[:2]
+        bar_h = 18
+        bar_w = min(200, w // 3)
+        bar_x = 16
+        bar_y = 16
+
+        # Normalize uncertainty to [0, 1]
+        norm = min(uncertainty / (threshold * 2.0), 1.0)
+
+        # Green→Red gradient
+        r = int(255 * norm)
+        g = int(255 * (1 - norm))
+        b = 0
+
+        # Flash effect when above threshold
+        above = uncertainty > threshold
+        if above and int(time.time() * 4) % 2 == 0:
+            # Flash: toggle between bright red and dark red
+            r = 255
+            g = 0
+            b = 0
+            bar_h = 22
+
+        # Draw background bar (dark)
+        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
+                       (40, 40, 40), -1)
+        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
+                       (100, 100, 100), 1)
+
+        # Draw filled portion
+        fill_w = int(bar_w * norm)
+        if fill_w > 0:
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h),
+                       (b, g, r), -1)
+
+        # Label
+        label = f"Q-unc: {uncertainty:.2f}"
+        if above:
+            label = f"!! {label} !! INTERVENE"
+        cv2.putText(frame, label, (bar_x + bar_w + 10, bar_y + bar_h - 4),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (b, g, r), 1, cv2.LINE_AA)
+
+        return above
 
     def _draw_status(self, frame):
         """Draw recording status indicator (colored circle) on frame."""
@@ -121,6 +176,10 @@ class ImageDisplayer(threading.Thread):
             if img_array is None:
                 break
 
+            # Unpack (images, uncertainty) tuple or just images
+            if isinstance(img_array, tuple):
+                img_array, self._latest_uncertainty = img_array
+
             panels = []
             for k, v in img_array.items():
                 if "full" in k:
@@ -150,6 +209,12 @@ class ImageDisplayer(threading.Thread):
 
             if self.enable_recording:
                 self._draw_status(frame)
+
+            # Draw Q uncertainty bar
+            if self._latest_uncertainty is not None:
+                q_mean, q_std = self._latest_uncertainty
+                self._draw_uncertainty_bar(frame, float(q_std), self.uncertainty_threshold)
+
             cv2.imshow(self.name, frame)
             if first:
                 cv2.resizeWindow(self.name, frame.shape[1], frame.shape[0])
@@ -224,6 +289,7 @@ class CR5AFEnv(gym.Env):
         self._reset_euler = np.deg2rad(config.RESET_POSE[3:])  # target orientation in rad
         self._servop_active = False
         self._target_pos: np.ndarray | None = None  # tracked ServoP target, not RT cache
+        self._uncertainty = None  # (q_mean, q_std) for visual overlay
 
         self.resetpos = np.concatenate(
             [config.RESET_POSE[:3], R.from_euler("XYZ", config.RESET_POSE[3:], degrees=True).as_quat()]
@@ -330,6 +396,7 @@ class CR5AFEnv(gym.Env):
         return pose
 
     def step(self, action: np.ndarray) -> tuple:
+        self._uncertainty = None  # clear on each step; actor will set before next step
         start_time = time.time()
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
@@ -426,6 +493,10 @@ class CR5AFEnv(gym.Env):
         delta = np.abs(np.hstack([current_pose[:3] - self._TARGET_POSE[:3], diff_euler]))
         return bool(np.all(delta < self._REWARD_THRESHOLD))
 
+    def set_uncertainty(self, uncertainty):
+        """Set (q_mean, q_std) tuple for visual overlay in ImageDisplayer."""
+        self._uncertainty = uncertainty
+
     def get_im(self) -> Dict[str, np.ndarray]:
         images = {}
         display_images = {}
@@ -449,7 +520,10 @@ class CR5AFEnv(gym.Env):
         if self.save_video:
             self.recording_frames.append(full_res_images)
         if self.display_image:
-            self.img_queue.put(display_images)
+            if self._uncertainty is not None:
+                self.img_queue.put((display_images, self._uncertainty))
+            else:
+                self.img_queue.put(display_images)
         return images
 
     def interpolate_move(self, goal: np.ndarray, timeout: float):

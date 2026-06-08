@@ -202,6 +202,18 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                 actions = config.action_ema_alpha * actions + (1 - config.action_ema_alpha) * prev_actions
             prev_actions = actions.copy()
 
+            # Compute Q ensemble uncertainty for visual overlay
+            if step >= config.random_steps and hasattr(config, 'uncertainty_overlay') and config.uncertainty_overlay:
+                sampling_rng, key = jax.random.split(sampling_rng)
+                q_mean, q_std = agent.get_uncertainty(
+                    observations=jax.device_put(obs),
+                    actions=jax.device_put(actions),
+                    seed=key,
+                )
+                # Pass uncertainty to env for rendering
+                if hasattr(env, 'set_uncertainty'):
+                    env.set_uncertainty((float(q_mean), float(q_std)))
+
             # Step environment
             with timer.context("step_env"):
 

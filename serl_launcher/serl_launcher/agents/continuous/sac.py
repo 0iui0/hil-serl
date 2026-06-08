@@ -324,6 +324,32 @@ class SACAgent(flax.struct.PyTreeNode):
 
         return self.replace(state=new_state), info
 
+    def get_uncertainty(
+        self,
+        observations: Data,
+        actions: jax.Array,
+        *,
+        seed: Optional[PRNGKey] = None,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """Return per-ensemble Q values and uncertainty (std across ensemble).
+
+        Returns:
+            q_values: (ensemble_size,) Q values from each critic
+            uncertainty: scalar std across ensemble members
+        """
+        rng = seed or self.state.rng
+        # Add batch dim for single obs/action
+        if observations.ndim == 4:
+            observations = observations[None]
+        if actions.ndim == 1:
+            actions = actions[None]
+        q_all = self.forward_critic(
+            observations, actions, rng=rng, train=False
+        )  # (ensemble_size, batch_size)
+        q_std = jnp.std(q_all, axis=0).squeeze()  # scalar
+        q_mean = jnp.mean(q_all, axis=0).squeeze()  # scalar
+        return q_mean, q_std
+
     @partial(jax.jit, static_argnames=("argmax",))
     def sample_actions(
         self,

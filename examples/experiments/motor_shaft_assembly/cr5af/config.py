@@ -104,6 +104,9 @@ class TrainConfig(DefaultTrainingConfig):
     argmax_warmup_steps = 20000  # use deterministic policy for first N actor steps to avoid jitter
     action_ema_alpha = 0.5  # EMA smoothing on policy actions (0=no smoothing, 1=no effect)
     encoder_type = "resnet-pretrained"
+    # Q uncertainty overlay on camera feed
+    uncertainty_overlay = True  # enable Q-uncertainty bar on video display
+    uncertainty_threshold = 1.0  # Q-std threshold for "INTERVENE" flash alert
     # Auto-switch training mode based on gripper availability
     setup_mode = "single-arm-learned-gripper" if EnvConfig.USE_GRIPPER else "single-arm-fixed-gripper"
     # Match BC checkpoint architecture (BCAgent uses [512, 512, 512])
